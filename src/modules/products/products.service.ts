@@ -1,0 +1,305 @@
+import {
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, In, Not } from 'typeorm';
+import { Product, ProductVariant, ProductMedia } from './entities/product.entity';
+import {
+  CreateProductDto,
+  UpdateProductDto,
+  ProductQueryDto,
+  BulkUpdateProductsDto,
+} from './dto/product.dto';
+import { CacheService } from '../../shared/services/cache.service';
+
+@Injectable()
+export class ProductsService {
+  constructor(
+    @InjectRepository(Product) private readonly productRepo: Repository<Product>,
+    @InjectRepository(ProductVariant) private readonly variantRepo: Repository<ProductVariant>,
+    @InjectRepository(ProductMedia) private readonly mediaRepo: Repository<ProductMedia>,
+    private readonly cache: CacheService,
+  ) {}
+
+  // ── Create ──
+
+  async create(dto: CreateProductDto): Promise<Product> {
+    const slug = await this.generateUniqueSlug(dto.name);
+
+    const product = this.productRepo.create({
+      name: dto.name,
+      slug,
+      description: dto.description,
+      shortDescription: dto.shortDescription,
+      categoryId: dto.categoryId,
+      isActive: dto.isActive ?? true,
+      isFeatured: dto.isFeatured ?? false,
+      attributes: dto.attributes,
+      metaTitle: dto.metaTitle ?? dto.name,
+      metaDescription: dto.metaDescription ?? dto.shortDescription,
+      tags: dto.tags,
+      variants: dto.variants.map((v, i) =>
+        this.variantRepo.create({
+          ...v,
+          // Default wholesale to retail if not provided, and vice versa
+          wholesalePriceNgn: v.wholesalePriceNgn ?? v.retailPriceNgn,
+          wholesalePriceUsd: v.wholesalePriceUsd ?? v.retailPriceUsd,
+          sortOrder: i,
+        }),
+      ),
+    });
+
+    const saved = await this.productRepo.save(product);
+
+    // Invalidate product list caches
+    await this.cache.invalidateProducts();
+
+    return saved;
+  }
+
+  // ── Find All (paginated, cached) ──
+
+  async findAll(query: ProductQueryDto): Promise<{
+    items: Product[];
+    total: number;
+    page: number;
+    limit: number;
+    pages: number;
+  }> {
+    // Build cache key from query params (include withDeleted so the two views stay separate)
+    const cacheKey = CacheService.productListKey({
+      page: query.page,
+      limit: query.limit,
+      search: query.search,
+      categoryId: query.categoryId,
+      isActive: query.isActive,
+      isFeatured: query.isFeatured,
+      sortBy: query.sortBy,
+      sortOrder: query.sortOrder,
+      withDeleted: query.withDeleted,
+      deletedOnly: query.deletedOnly,
+    });
+
+    // Check cache (skip for search queries — use shorter TTL)
+    const ttl = query.search ? CacheService.TTL.SEARCH : CacheService.TTL.PRODUCT_LIST;
+    const cached = await this.cache.get<{
+      items: Product[];
+      total: number;
+      page: number;
+      limit: number;
+      pages: number;
+    }>(cacheKey);
+    if (cached) return cached;
+
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 20, 100);
+    const skip = (page - 1) * limit;
+
+    const qb = this.productRepo
+      .createQueryBuilder('product')
+      .leftJoinAndSelect('product.variants', 'variant')
+      .leftJoinAndSelect('product.media', 'media')
+      .leftJoinAndSelect('product.category', 'category');
+
+    // Soft-delete visibility
+    if (query.withDeleted || query.deletedOnly) {
+      qb.withDeleted();
+    }
+    if (query.deletedOnly) {
+      qb.andWhere('product.deletedAt IS NOT NULL');
+    }
+
+    // Filters
+    if (query.search) {
+      qb.andWhere(
+        '(product.name ILIKE :search OR product.description ILIKE :search OR product.tags::text ILIKE :search)',
+        { search: `%${query.search}%` },
+      );
+    }
+
+    if (query.categoryId) {
+      qb.andWhere('product.categoryId = :categoryId', { categoryId: query.categoryId });
+    }
+
+    if (query.isActive !== undefined) {
+      qb.andWhere('product.isActive = :isActive', { isActive: query.isActive });
+    }
+
+    if (query.isFeatured !== undefined) {
+      qb.andWhere('product.isFeatured = :isFeatured', { isFeatured: query.isFeatured });
+    }
+
+    // Sorting
+    const sortBy = query.sortBy ?? 'createdAt';
+    const sortOrder = query.sortOrder ?? 'DESC';
+    if (sortBy === 'retailPriceNgn' || sortBy === 'retailPriceUsd') {
+      qb.addOrderBy(`variant.${sortBy}`, sortOrder);
+    } else {
+      qb.addOrderBy(`product.${sortBy}`, sortOrder);
+    }
+
+    qb.addOrderBy('media.sortOrder', 'ASC');
+    qb.addOrderBy('variant.sortOrder', 'ASC');
+    qb.skip(skip).take(limit);
+
+    const [items, total] = await qb.getManyAndCount();
+
+    const result = { items, total, page, limit, pages: Math.ceil(total / limit) };
+
+    // Cache the result
+    await this.cache.set(cacheKey, result, ttl);
+
+    return result;
+  }
+
+  // ── Find One (by ID, cached) ──
+
+  async findOne(id: string, opts: { withDeleted?: boolean } = {}): Promise<Product> {
+    const cacheKey = CacheService.productDetailByIdKey(id) + (opts.withDeleted ? ':withDeleted' : '');
+    const cached = await this.cache.get<Product>(cacheKey);
+    if (cached) return cached;
+
+    const product = await this.productRepo.findOne({
+      where: { id },
+      relations: ['variants', 'media', 'category'],
+      order: { media: { sortOrder: 'ASC' }, variants: { sortOrder: 'ASC' } },
+      withDeleted: opts.withDeleted ?? false,
+    });
+    if (!product) {
+      throw new NotFoundException(`Product ${id} not found`);
+    }
+
+    await this.cache.set(cacheKey, product, CacheService.TTL.PRODUCT_DETAIL);
+    return product;
+  }
+
+  // ── Find by Slug (storefront, cached) ──
+
+  async findBySlug(slug: string): Promise<Product> {
+    const cacheKey = CacheService.productDetailKey(slug);
+    const cached = await this.cache.get<Product>(cacheKey);
+    if (cached) return cached;
+
+    const product = await this.productRepo.findOne({
+      where: { slug, isActive: true },
+      relations: ['variants', 'media', 'category'],
+      order: { media: { sortOrder: 'ASC' }, variants: { sortOrder: 'ASC' } },
+    });
+    if (!product) {
+      throw new NotFoundException(`Product not found`);
+    }
+
+    await this.cache.set(cacheKey, product, CacheService.TTL.PRODUCT_DETAIL);
+    return product;
+  }
+
+  // ── Update ──
+
+  async update(id: string, dto: UpdateProductDto): Promise<Product> {
+    const product = await this.findOne(id);
+
+    if (dto.name && dto.name !== product.name) {
+      const newSlug = await this.generateUniqueSlug(dto.name, id);
+      Object.assign(product, { ...dto, slug: newSlug });
+    } else {
+      Object.assign(product, dto);
+    }
+
+    const saved = await this.productRepo.save(product);
+
+    // Invalidate all product caches (list + detail)
+    await this.cache.invalidateProducts();
+
+    return saved;
+  }
+
+  // ── Bulk Update ──
+
+  /**
+   * Apply the same set of flag changes to a batch of products.
+   * Currently supports isActive, isFeatured, and categoryId — the
+   * most common admin bulk actions. Slug/name/variant edits remain
+   * single-record operations because they require per-row validation.
+   */
+  async bulkUpdate(dto: BulkUpdateProductsDto): Promise<{ updated: number }> {
+    if (!dto.ids || dto.ids.length === 0) {
+      return { updated: 0 };
+    }
+
+    const patch: Partial<Product> = {};
+    if (dto.isActive !== undefined) patch.isActive = dto.isActive;
+    if (dto.isFeatured !== undefined) patch.isFeatured = dto.isFeatured;
+    if (dto.categoryId !== undefined) patch.categoryId = dto.categoryId || undefined;
+
+    if (Object.keys(patch).length === 0) return { updated: 0 };
+
+    const result = await this.productRepo.update({ id: In(dto.ids) }, patch);
+    await this.cache.invalidateProducts();
+    return { updated: result.affected ?? 0 };
+  }
+
+  // ── Soft Delete ──
+
+  async remove(id: string): Promise<void> {
+    const product = await this.findOne(id);
+    await this.productRepo.softRemove(product);
+    await this.cache.invalidateProducts();
+  }
+
+  // ── Restore ──
+
+  async restore(id: string): Promise<Product> {
+    await this.productRepo.restore(id);
+    await this.cache.invalidateProducts();
+    return this.findOne(id, { withDeleted: true });
+  }
+
+  // ── Slug Generation ──
+
+  private slugify(name: string): string {
+    return name
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .substring(0, 340); // leave headroom for -NN suffix (column limit 350)
+  }
+
+  /**
+   * Generate a slug that is unique across the `products` table. If the
+   * base slug already exists for a different product, append a numeric
+   * suffix: `-2`, `-3`, ... until an unused one is found. Includes
+   * soft-deleted rows so we don't collide with a restored record later.
+   */
+  private async generateUniqueSlug(name: string, excludeId?: string): Promise<string> {
+    const base = this.slugify(name);
+    if (!base) return base;
+
+    const where = excludeId ? { slug: base, id: Not(excludeId) } : { slug: base };
+    const existing = await this.productRepo.findOne({
+      where,
+      withDeleted: true,
+      select: { id: true },
+    });
+    if (!existing) return base;
+
+    // Look up all siblings with the same base stem and pick next number.
+    const candidates = await this.productRepo
+      .createQueryBuilder('p')
+      .withDeleted()
+      .select(['p.id', 'p.slug'])
+      .where('p.slug = :base OR p.slug LIKE :pattern', {
+        base,
+        pattern: `${base}-%`,
+      })
+      .andWhere(excludeId ? 'p.id != :excludeId' : '1=1', { excludeId })
+      .getMany();
+
+    const taken = new Set(candidates.map((c) => c.slug));
+    let n = 2;
+    while (taken.has(`${base}-${n}`)) n += 1;
+    return `${base}-${n}`;
+  }
+}
