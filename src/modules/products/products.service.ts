@@ -96,6 +96,15 @@ export class ProductsService {
     const limit = Math.min(query.limit ?? 20, 100);
     const skip = (page - 1) * limit;
 
+    // When there's a search term, use a two-phase query:
+    //   1) rank matching product IDs via tsvector + trigram similarity
+    //   2) hydrate those IDs with relations while preserving rank order
+    // This keeps relevance-sorted results correct even with left joins,
+    // and tolerates typos (e.g. "lether breafcase" → "leather briefcase").
+    if (query.search && query.search.trim().length > 0) {
+      return this.searchAll(query, page, limit, skip, cacheKey, ttl);
+    }
+
     const qb = this.productRepo
       .createQueryBuilder('product')
       .leftJoinAndSelect('product.variants', 'variant')
@@ -108,14 +117,6 @@ export class ProductsService {
     }
     if (query.deletedOnly) {
       qb.andWhere('product.deletedAt IS NOT NULL');
-    }
-
-    // Filters
-    if (query.search) {
-      qb.andWhere(
-        '(product.name ILIKE :search OR product.description ILIKE :search OR product.tags::text ILIKE :search)',
-        { search: `%${query.search}%` },
-      );
     }
 
     if (query.categoryId) {
@@ -150,6 +151,93 @@ export class ProductsService {
     // Cache the result
     await this.cache.set(cacheKey, result, ttl);
 
+    return result;
+  }
+
+  /**
+   * Ranked full-text search. Uses websearch_to_tsquery (so users can
+   * type "bag -sale" or quoted phrases) against a pre-generated tsvector
+   * column, then falls back to trigram similarity so typos like
+   * "lether breafcase" still surface the correct product. Results are
+   * ordered by combined rank descending.
+   */
+  private async searchAll(
+    query: ProductQueryDto,
+    page: number,
+    limit: number,
+    skip: number,
+    cacheKey: string,
+    ttl: number,
+  ) {
+    const term = query.search!.trim();
+
+    const ids = this.productRepo
+      .createQueryBuilder('p')
+      .select('p.id', 'id')
+      .addSelect(
+        `(
+          ts_rank_cd(p.search_vector, websearch_to_tsquery('simple', :term))
+          + GREATEST(similarity(lower(p.name), lower(:term)), 0)
+          + CASE WHEN lower(p.name) ILIKE :like THEN 0.25 ELSE 0 END
+        )`,
+        'rank',
+      )
+      .where(
+        `(
+          p.search_vector @@ websearch_to_tsquery('simple', :term)
+          OR similarity(lower(p.name), lower(:term)) > 0.2
+          OR lower(p.name) ILIKE :like
+        )`,
+        { term, like: `%${term.toLowerCase()}%` },
+      );
+
+    if (query.withDeleted || query.deletedOnly) ids.withDeleted();
+    if (query.deletedOnly) ids.andWhere('p.deletedAt IS NOT NULL');
+    if (query.categoryId)
+      ids.andWhere('p.categoryId = :categoryId', { categoryId: query.categoryId });
+    if (query.isActive !== undefined)
+      ids.andWhere('p.isActive = :isActive', { isActive: query.isActive });
+    if (query.isFeatured !== undefined)
+      ids.andWhere('p.isFeatured = :isFeatured', { isFeatured: query.isFeatured });
+
+    // Count total matches (clone so ordering/offset don't interfere)
+    const total = await ids.clone().getCount();
+
+    // Fetch ranked page of IDs
+    const pageIds = await ids
+      .orderBy('rank', 'DESC')
+      .addOrderBy('p.createdAt', 'DESC')
+      .offset(skip)
+      .limit(limit)
+      .getRawMany<{ id: string; rank: string }>();
+
+    const rankedIds = pageIds.map((r) => r.id);
+    if (rankedIds.length === 0) {
+      const empty = { items: [], total, page, limit, pages: Math.ceil(total / limit) };
+      await this.cache.set(cacheKey, empty, ttl);
+      return empty;
+    }
+
+    // Hydrate with relations
+    const hydrateQb = this.productRepo
+      .createQueryBuilder('product')
+      .leftJoinAndSelect('product.variants', 'variant')
+      .leftJoinAndSelect('product.media', 'media')
+      .leftJoinAndSelect('product.category', 'category')
+      .where('product.id IN (:...ids)', { ids: rankedIds })
+      .addOrderBy('media.sortOrder', 'ASC')
+      .addOrderBy('variant.sortOrder', 'ASC');
+
+    if (query.withDeleted || query.deletedOnly) hydrateQb.withDeleted();
+
+    const rows = await hydrateQb.getMany();
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const items = rankedIds
+      .map((id) => byId.get(id))
+      .filter((p): p is Product => !!p);
+
+    const result = { items, total, page, limit, pages: Math.ceil(total / limit) };
+    await this.cache.set(cacheKey, result, ttl);
     return result;
   }
 
