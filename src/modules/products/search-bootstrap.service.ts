@@ -34,13 +34,13 @@ export class SearchBootstrapService implements OnModuleInit {
         ALTER TABLE products
           ADD COLUMN IF NOT EXISTS search_vector tsvector
             GENERATED ALWAYS AS (
-              setweight(to_tsvector('simple', coalesce("name", '')), 'A') ||
-              setweight(to_tsvector('simple', coalesce("shortDescription", '')), 'B') ||
-              setweight(to_tsvector('simple', coalesce("description", '')), 'C') ||
+              setweight(to_tsvector('simple'::regconfig, coalesce("name", '')), 'A') ||
+              setweight(to_tsvector('simple'::regconfig, coalesce("shortDescription", '')), 'B') ||
+              setweight(to_tsvector('simple'::regconfig, coalesce("description", '')), 'C') ||
               setweight(
                 to_tsvector(
-                  'simple',
-                  coalesce(array_to_string(string_to_array("tags", ','), ' '), '')
+                  'simple'::regconfig,
+                  coalesce(regexp_replace("tags", ',', ' ', 'g'), '')
                 ),
                 'B'
               )

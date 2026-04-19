@@ -38,6 +38,9 @@ import { StaffModule } from './modules/staff/staff.module';
     }),
 
     // ── Database ──
+    // Schema is managed by TypeORM migrations (see `src/database/migrations`).
+    // `synchronize` is OFF everywhere; `migrationsRun: true` applies any
+    // pending migrations on boot so dev/CI stays in sync without a manual step.
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
@@ -48,7 +51,10 @@ import { StaffModule } from './modules/staff/staff.module';
         password: config.get<string>('DB_PASSWORD') ?? 'martinonoir_dev',
         database: config.get<string>('DB_NAME') ?? 'martinonoir',
         autoLoadEntities: true,
-        synchronize: config.get<string>('NODE_ENV') !== 'production',
+        synchronize: false,
+        migrations: [__dirname + '/database/migrations/*.{ts,js}'],
+        migrationsTableName: 'typeorm_migrations',
+        migrationsRun: true,
         logging: config.get<string>('NODE_ENV') !== 'production',
       }),
     }),

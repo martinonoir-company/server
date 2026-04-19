@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Put,
   Delete,
   Body,
   Param,
@@ -12,7 +13,13 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { StaffService } from './staff.service';
-import { CreateStaffDto, UpdateStaffRoleDto, ListStaffQueryDto } from './dto/staff.dto';
+import {
+  CreateStaffDto,
+  UpdateStaffRoleDto,
+  UpdateStaffPermissionsDto,
+  TogglePermissionDto,
+  ListStaffQueryDto,
+} from './dto/staff.dto';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { RolesGuard } from '../../shared/guards/roles.guard';
 import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
@@ -25,7 +32,7 @@ import { User } from '../users/entities/user.entity';
 export class StaffController {
   constructor(private readonly staffService: StaffService) {}
 
-  /** List all staff — requires staff:read */
+  /** List staff (optionally including suspended) — requires staff:read. */
   @Get()
   @RequirePermissions(Permission.STAFF_READ)
   async listStaff(@Query() query: ListStaffQueryDto) {
@@ -33,7 +40,6 @@ export class StaffController {
     return { data: result };
   }
 
-  /** Get single staff member */
   @Get(':id')
   @RequirePermissions(Permission.STAFF_READ)
   async getStaff(@Param('id') id: string) {
@@ -41,7 +47,6 @@ export class StaffController {
     return { data: staff };
   }
 
-  /** Create staff + send invitation email — requires staff:create */
   @Post()
   @RequirePermissions(Permission.STAFF_CREATE)
   async createStaff(
@@ -52,7 +57,6 @@ export class StaffController {
     return { data: staff };
   }
 
-  /** Update staff role — requires staff:update */
   @Patch(':id/role')
   @RequirePermissions(Permission.STAFF_UPDATE)
   async updateRole(
@@ -64,22 +68,82 @@ export class StaffController {
     return { data: staff };
   }
 
-  /** Deactivate (soft-delete) staff — requires staff:delete */
+  /** Replace the entire per-user permission override list. */
+  @Put(':id/permissions')
+  @RequirePermissions(Permission.STAFF_UPDATE)
+  async replacePermissions(
+    @Param('id') id: string,
+    @Body() dto: UpdateStaffPermissionsDto,
+    @CurrentUser() user: User,
+  ) {
+    const staff = await this.staffService.replacePermissions(id, dto, user);
+    return { data: staff };
+  }
+
+  /** Flip a single permission flag. */
+  @Patch(':id/permissions')
+  @RequirePermissions(Permission.STAFF_UPDATE)
+  async togglePermission(
+    @Param('id') id: string,
+    @Body() dto: TogglePermissionDto,
+    @CurrentUser() user: User,
+  ) {
+    const staff = await this.staffService.togglePermission(id, dto, user);
+    return { data: staff };
+  }
+
+  /** Grant every permission currently defined. */
+  @Post(':id/permissions/enable-all')
+  @RequirePermissions(Permission.STAFF_UPDATE)
+  async enableAllPermissions(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+  ) {
+    const staff = await this.staffService.enableAllPermissions(id, user);
+    return { data: staff };
+  }
+
+  /** Revoke every permission. */
+  @Post(':id/permissions/disable-all')
+  @RequirePermissions(Permission.STAFF_UPDATE)
+  async disableAllPermissions(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+  ) {
+    const staff = await this.staffService.disableAllPermissions(id, user);
+    return { data: staff };
+  }
+
+  /** Suspend (soft-delete) + revoke sessions. */
+  @Patch(':id/suspend')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(Permission.STAFF_UPDATE)
+  async suspendStaff(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+  ): Promise<{ data: { suspended: true } }> {
+    await this.staffService.suspendStaff(id, user);
+    return { data: { suspended: true } };
+  }
+
+  @Patch(':id/reactivate')
+  @RequirePermissions(Permission.STAFF_UPDATE)
+  async reactivateStaff(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+  ) {
+    const staff = await this.staffService.reactivateStaff(id, user);
+    return { data: staff };
+  }
+
+  /** Hard-delete — irreversible. */
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermissions(Permission.STAFF_DELETE)
-  async deactivateStaff(
+  async deleteStaff(
     @Param('id') id: string,
     @CurrentUser() user: User,
   ): Promise<void> {
-    await this.staffService.deactivateStaff(id, user);
-  }
-
-  /** Reactivate staff — requires staff:update */
-  @Patch(':id/reactivate')
-  @RequirePermissions(Permission.STAFF_UPDATE)
-  async reactivateStaff(@Param('id') id: string) {
-    const staff = await this.staffService.reactivateStaff(id);
-    return { data: staff };
+    await this.staffService.deleteStaff(id, user);
   }
 }

@@ -57,19 +57,30 @@ export class RolesGuard implements CanActivate {
       return true;
     }
 
-    // 5. Load role permissions
-    const roleName = this.mapUserRoleToRoleName(user.role);
-    const role = await this.roleRepo.findOne({ where: { name: roleName } });
-
-    if (!role) {
-      throw new ForbiddenException('Role not configured');
+    // 5. Per-user permission override (set via staff permission management).
+    //    An empty array is meaningful — it means "no grants" — so we key off
+    //    Array.isArray rather than truthiness.
+    let effectivePermissions: string[];
+    if (Array.isArray(user.permissions)) {
+      effectivePermissions = user.permissions;
+    } else {
+      const roleName = this.mapUserRoleToRoleName(user.role);
+      const role = await this.roleRepo.findOne({ where: { name: roleName } });
+      if (!role) {
+        throw new ForbiddenException('Role not configured');
+      }
+      effectivePermissions = role.permissions;
     }
 
     // 6. Check ALL required permissions (AND logic)
-    const hasAll = requiredPermissions.every((perm) => role.permissions.includes(perm));
+    const hasAll = requiredPermissions.every((perm) =>
+      effectivePermissions.includes(perm),
+    );
 
     if (!hasAll) {
-      const missing = requiredPermissions.filter((p) => !role.permissions.includes(p));
+      const missing = requiredPermissions.filter(
+        (p) => !effectivePermissions.includes(p),
+      );
       throw new ForbiddenException(
         `Insufficient permissions. Missing: ${missing.join(', ')}`,
       );
