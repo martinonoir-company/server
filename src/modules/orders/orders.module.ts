@@ -8,6 +8,7 @@ import { PricingEngine } from './pricing.engine';
 import { InventoryModule } from '../inventory/inventory.module';
 import { CouponsModule } from '../coupons/coupons.module';
 import { ShippingModule } from '../shipping/shipping.module';
+import { CartModule } from '../cart/cart.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { ShippingModule } from '../shipping/shipping.module';
     InventoryModule,
     CouponsModule,
     ShippingModule,
+    CartModule,
   ],
   controllers: [OrdersController],
   providers: [OrdersService, PricingEngine],

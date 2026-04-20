@@ -11,6 +11,7 @@ import { ProductVariant } from '../products/entities/product.entity';
 import { Product } from '../products/entities/product.entity';
 import { InventoryService } from '../inventory/inventory.service';
 import { MovementKind } from '../inventory/entities/inventory.entity';
+import { CartService } from '../cart/cart.service';
 import { CreateOrderDto, UpdateOrderStatusDto, OrderQueryDto } from './dto/order.dto';
 
 @Injectable()
@@ -24,6 +25,7 @@ export class OrdersService {
     @InjectRepository(ProductVariant) private readonly variantRepo: Repository<ProductVariant>,
     @InjectRepository(Product) private readonly productRepo: Repository<Product>,
     private readonly inventoryService: InventoryService,
+    private readonly cartService: CartService,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -43,7 +45,7 @@ export class OrdersService {
 
     const channel = dto.channel ?? OrderChannel.STOREFRONT;
 
-    return this.dataSource.transaction(async (manager) => {
+    const order = await this.dataSource.transaction(async (manager) => {
       // 1. Resolve variants and calculate totals
       let subtotal = 0;
       const orderItems: Partial<OrderItem>[] = [];
@@ -129,6 +131,20 @@ export class OrdersService {
 
       return manager.save(Order, order);
     });
+
+    // Clear the user's server-persisted cart once the order row is committed.
+    // A cart-clear failure must NOT roll back the order, so this lives outside
+    // the transaction and swallows errors (the next /cart read will still be
+    // consistent on a best-effort basis).
+    if (userId) {
+      try {
+        await this.cartService.clearCart(userId);
+      } catch {
+        // intentionally ignored — order already succeeded
+      }
+    }
+
+    return order;
   }
 
   // ── Transition Status (FSM) ──
