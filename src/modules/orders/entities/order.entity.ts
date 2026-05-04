@@ -125,9 +125,25 @@ export class Order extends BaseEntity {
     phone?: string;
   };
 
-  // ── Coupon ──
+  // ── Coupon / Discount tracking ──
   @Column({ type: 'varchar', length: 50, nullable: true })
   couponCode?: string;
+
+  /** COUPON or MANUAL — which type of discount was applied */
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  discountType?: string;
+
+  /** Staff user ID who applied the discount/coupon */
+  @Column({ type: 'varchar', length: 26, nullable: true })
+  discountAppliedBy?: string;
+
+  /** Staff name who applied the discount/coupon (denormalised for display) */
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  discountAppliedByName?: string;
+
+  /** Timestamp when the discount/coupon was applied */
+  @Column({ type: 'timestamptz', nullable: true })
+  discountAppliedAt?: Date;
 
   // ── Idempotency ──
   @Index({ unique: true })

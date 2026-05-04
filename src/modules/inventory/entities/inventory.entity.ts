@@ -31,6 +31,10 @@ export enum MovementKind {
  *   SALE, RESERVATION, ADJUSTMENT, TRANSFER_OUT → decreases available
  */
 @Entity('stock_movements')
+@Index(
+  ['referenceId', 'referenceType', 'variantId', 'kind'],
+  { unique: true, where: '"referenceId" IS NOT NULL' },
+)
 export class StockMovement extends BaseEntity {
   @Index()
   @Column({ type: 'varchar', length: 26 })

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Order, OrderItem, OrderStatusHistory } from './entities/order.entity';
 import { Product, ProductVariant } from '../products/entities/product.entity';
+import { User } from '../users/entities/user.entity';
 import { OrdersService } from './orders.service';
 import { OrdersController } from './orders.controller';
 import { PricingEngine } from './pricing.engine';
@@ -12,7 +13,7 @@ import { CartModule } from '../cart/cart.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Order, OrderItem, OrderStatusHistory, Product, ProductVariant]),
+    TypeOrmModule.forFeature([Order, OrderItem, OrderStatusHistory, Product, ProductVariant, User]),
     InventoryModule,
     CouponsModule,
     ShippingModule,

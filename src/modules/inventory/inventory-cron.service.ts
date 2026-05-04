@@ -1,25 +1,34 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan } from 'typeorm';
+import { Repository } from 'typeorm';
 import { StockMovement, StockLevel, MovementKind } from './entities/inventory.entity';
+import { ProductVariant } from '../products/entities/product.entity';
 import { InventoryService } from './inventory.service';
+import { EmailService } from '../notifications/email.service';
 
 /**
  * Scheduled inventory tasks.
  * - Reservation expiry: auto-releases reservations older than 15 minutes
- * - Low stock alerts: checks for variants below threshold
+ * - Low stock alerts: checks for variants below threshold and emails admin
  */
 @Injectable()
 export class InventoryCronService {
   private readonly logger = new Logger(InventoryCronService.name);
   private readonly RESERVATION_TTL_MINUTES = 15;
   private readonly LOW_STOCK_THRESHOLD = 5;
+  private readonly ADMIN_ALERT_EMAIL = process.env['ADMIN_ALERT_EMAIL'] ?? 'martinonoirbag@gmail.com';
+
+  /** Track last alert time per variant to avoid spamming (24h cooldown) */
+  private readonly lastAlerted = new Map<string, number>();
+  private readonly ALERT_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
 
   constructor(
     @InjectRepository(StockMovement) private readonly movementRepo: Repository<StockMovement>,
     @InjectRepository(StockLevel) private readonly levelRepo: Repository<StockLevel>,
+    @InjectRepository(ProductVariant) private readonly variantRepo: Repository<ProductVariant>,
     private readonly inventoryService: InventoryService,
+    private readonly emailService: EmailService,
   ) {}
 
   /**
@@ -80,8 +89,8 @@ export class InventoryCronService {
   }
 
   /**
-   * Every 5 minutes: check for low stock and log warnings.
-   * TODO: Wire to EmailService.sendLowStockAlert() when notifications are configured.
+   * Every 5 minutes: check for low stock and send email alerts.
+   * Each variant is only alerted once per 24 hours to prevent spam.
    */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async checkLowStock(): Promise<void> {
@@ -98,6 +107,29 @@ export class InventoryCronService {
       this.logger.warn(
         `LOW STOCK: variant=${level.variantId}, warehouse=${level.warehouseCode}, available=${available}`,
       );
+
+      // Check cooldown — skip if alerted recently
+      const lastTime = this.lastAlerted.get(level.variantId) ?? 0;
+      if (Date.now() - lastTime < this.ALERT_COOLDOWN_MS) continue;
+
+      // Look up variant name and SKU
+      try {
+        const variant = await this.variantRepo.findOne({ where: { id: level.variantId } });
+        if (!variant) continue;
+
+        await this.emailService.sendLowStockAlert(
+          this.ADMIN_ALERT_EMAIL,
+          variant.sku,
+          variant.name ?? variant.sku,
+          available,
+        );
+
+        this.lastAlerted.set(level.variantId, Date.now());
+        this.logger.log(`Low stock alert sent for ${variant.sku} (${variant.name})`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        this.logger.error(`Failed to send low stock alert for ${level.variantId}: ${msg}`);
+      }
     }
   }
 }

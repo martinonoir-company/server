@@ -26,6 +26,8 @@ export class CacheService implements OnModuleInit, OnModuleDestroy {
     CATEGORY_LIST: 1800,   // 30 min
     SEARCH: 120,           // 2 min
     WISHLIST: 300,         // 5 min
+    STOCK_LEVEL: 30,       // 30 sec — near real-time
+    POS_CATALOG: 300,      // 5 min — product list for POS
   } as const;
 
   constructor(private readonly config: ConfigService) {}
@@ -151,6 +153,16 @@ export class CacheService implements OnModuleInit, OnModuleDestroy {
     return `categories:slug:${slug}`;
   }
 
+  // ── Stock Cache Keys ──
+
+  static stockLevelKey(variantId: string, warehouseCode = 'DEFAULT'): string {
+    return `stock:level:${variantId}:${warehouseCode}`;
+  }
+
+  static stockLevelsAllKey(): string {
+    return 'stock:levels:all';
+  }
+
   // ── Invalidation Helpers ──
 
   /** Flush all product caches (on product create/update/delete) */
@@ -161,5 +173,13 @@ export class CacheService implements OnModuleInit, OnModuleDestroy {
   /** Flush all category caches */
   async invalidateCategories(): Promise<void> {
     await this.delPattern('categories:*');
+  }
+
+  /** Flush stock caches for a specific variant (or all stock) */
+  async invalidateStock(variantId?: string): Promise<void> {
+    if (variantId) {
+      await this.delPattern(`stock:level:${variantId}:*`);
+    }
+    await this.del(CacheService.stockLevelsAllKey());
   }
 }

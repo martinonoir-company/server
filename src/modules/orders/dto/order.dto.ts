@@ -79,4 +79,10 @@ export class OrderQueryDto {
   @IsOptional() @IsNumber() @Min(1) limit?: number;
   @IsOptional() @IsEnum(['createdAt', 'grandTotal', 'orderNumber']) sortBy?: string;
   @IsOptional() @IsEnum(['ASC', 'DESC']) sortOrder?: 'ASC' | 'DESC';
+  /** ISO date string — filter orders created on or after this date */
+  @IsOptional() @IsString() startDate?: string;
+  /** ISO date string — filter orders created on or before this date */
+  @IsOptional() @IsString() endDate?: string;
+  /** Search by order number */
+  @IsOptional() @IsString() search?: string;
 }

@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
@@ -12,10 +13,13 @@ import { Product } from '../products/entities/product.entity';
 import { InventoryService } from '../inventory/inventory.service';
 import { MovementKind } from '../inventory/entities/inventory.entity';
 import { CartService } from '../cart/cart.service';
+import { EmailService } from '../notifications/email.service';
+import { User } from '../users/entities/user.entity';
 import { CreateOrderDto, UpdateOrderStatusDto, OrderQueryDto } from './dto/order.dto';
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
   private orderCounter = 0;
 
   constructor(
@@ -24,8 +28,10 @@ export class OrdersService {
     @InjectRepository(OrderStatusHistory) private readonly historyRepo: Repository<OrderStatusHistory>,
     @InjectRepository(ProductVariant) private readonly variantRepo: Repository<ProductVariant>,
     @InjectRepository(Product) private readonly productRepo: Repository<Product>,
+    @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly inventoryService: InventoryService,
     private readonly cartService: CartService,
+    private readonly emailService: EmailService,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -65,15 +71,29 @@ export class OrdersService {
           throw new BadRequestException(`Product for variant ${cartItem.variantId} is unavailable`);
         }
 
-        // 2. Reserve inventory
+        // 2. Handle inventory based on channel
         if (variant.trackInventory) {
-          await this.inventoryService.recordMovement({
-            variantId: variant.id,
-            kind: MovementKind.RESERVATION,
-            quantity: cartItem.quantity,
-            referenceType: 'ORDER',
-            reason: 'Checkout reservation',
-          });
+          if (channel === OrderChannel.POS) {
+            // POS: immediate stock deduction (no reservation)
+            await this.inventoryService.recordMovement({
+              variantId: variant.id,
+              kind: MovementKind.SALE,
+              quantity: cartItem.quantity,
+              referenceId: dto.idempotencyKey,
+              referenceType: 'POS_SALE',
+              reason: 'POS direct sale',
+            });
+          } else {
+            // Storefront/Admin: reserve first, deduct on payment
+            await this.inventoryService.recordMovement({
+              variantId: variant.id,
+              kind: MovementKind.RESERVATION,
+              quantity: cartItem.quantity,
+              referenceId: dto.idempotencyKey,
+              referenceType: 'ORDER',
+              reason: 'Checkout reservation',
+            });
+          }
         }
 
         // Get correct price based on channel + currency
@@ -101,11 +121,13 @@ export class OrdersService {
 
       // 3. Create order
       const orderNumber = this.generateOrderNumber();
+      const isPOS = channel === OrderChannel.POS;
+      const initialStatus = isPOS ? OrderStatus.PAID : OrderStatus.PENDING_PAYMENT;
       const order = manager.create(Order, {
         orderNumber,
         userId,
         guestEmail: dto.guestEmail,
-        status: OrderStatus.PENDING_PAYMENT,
+        status: initialStatus,
         channel,
         currency,
         subtotal,
@@ -114,6 +136,7 @@ export class OrdersService {
         taxTotal: 0,
         grandTotal: subtotal,
         paymentMethod: dto.paymentMethod,
+        paidAt: isPOS ? new Date() : undefined,
         shippingAddress: dto.shippingAddress,
         couponCode: dto.couponCode,
         customerNote: dto.customerNote,
@@ -122,9 +145,9 @@ export class OrdersService {
         statusHistory: [
           manager.create(OrderStatusHistory, {
             fromStatus: OrderStatus.DRAFT,
-            toStatus: OrderStatus.PENDING_PAYMENT,
+            toStatus: initialStatus,
             changedBy: userId,
-            reason: 'Checkout initiated',
+            reason: isPOS ? 'POS sale — immediate payment' : 'Checkout initiated',
           }),
         ],
       });
@@ -143,6 +166,11 @@ export class OrdersService {
         // intentionally ignored — order already succeeded
       }
     }
+
+    // Send order confirmation email (non-blocking)
+    this.sendOrderEmail(order).catch((err) =>
+      this.logger.error(`Order confirmation email failed: ${err.message}`),
+    );
 
     return order;
   }
@@ -230,11 +258,25 @@ export class OrdersService {
       await manager.update(Order, order.id, { status: dto.status, paidAt: order.paidAt });
 
       // Return fresh order
-      return manager.findOneOrFail(Order, {
+      const updated = await manager.findOneOrFail(Order, {
         where: { id: order.id },
-        relations: ['items', 'statusHistory'],
+        relations: ['items', 'statusHistory', 'user'],
         order: { statusHistory: { createdAt: 'ASC' } },
       });
+
+      // Send status-specific emails (non-blocking, outside transaction)
+      if (dto.status === OrderStatus.PAID) {
+        this.sendOrderEmail(updated).catch((err) =>
+          this.logger.error(`Order confirmation email failed: ${err.message}`),
+        );
+      }
+      if (dto.status === OrderStatus.SHIPPED) {
+        this.sendShippingEmail(updated).catch((err) =>
+          this.logger.error(`Shipping notification email failed: ${err.message}`),
+        );
+      }
+
+      return updated;
     });
   }
 
@@ -264,6 +306,18 @@ export class OrdersService {
     }
     if (query.channel) {
       qb.andWhere('order.channel = :channel', { channel: query.channel });
+    }
+    if (query.startDate) {
+      qb.andWhere('order.createdAt >= :startDate', { startDate: new Date(query.startDate) });
+    }
+    if (query.endDate) {
+      // Include the full end date day
+      const end = new Date(query.endDate);
+      end.setHours(23, 59, 59, 999);
+      qb.andWhere('order.createdAt <= :endDate', { endDate: end });
+    }
+    if (query.search?.trim()) {
+      qb.andWhere('order.orderNumber ILIKE :search', { search: `%${query.search.trim()}%` });
     }
 
     const sortBy = query.sortBy ?? 'createdAt';
@@ -309,5 +363,43 @@ export class OrdersService {
     this.orderCounter++;
     const seq = this.orderCounter.toString().padStart(5, '0');
     return `MN-${y}${m}${d}-${seq}`;
+  }
+
+  // ── Email Helpers ──
+
+  private async sendOrderEmail(order: Order): Promise<void> {
+    const email = await this.resolveOrderEmail(order);
+    if (!email) return;
+
+    const items = order.items?.map((i) => ({
+      name: i.productName,
+      variant: i.variantName ?? '',
+      quantity: i.quantity,
+      price: Number(i.lineTotal),
+    }));
+
+    await this.emailService.sendOrderConfirmation(
+      email,
+      order.orderNumber,
+      Number(order.grandTotal),
+      order.currency,
+      items,
+    );
+  }
+
+  private async sendShippingEmail(order: Order): Promise<void> {
+    const email = await this.resolveOrderEmail(order);
+    if (!email) return;
+    await this.emailService.sendShippingNotification(email, order.orderNumber);
+  }
+
+  private async resolveOrderEmail(order: Order): Promise<string | null> {
+    if (order.guestEmail) return order.guestEmail;
+    if (order.user?.email) return order.user.email;
+    if (order.userId) {
+      const user = await this.userRepo.findOne({ where: { id: order.userId } });
+      return user?.email ?? null;
+    }
+    return null;
   }
 }
