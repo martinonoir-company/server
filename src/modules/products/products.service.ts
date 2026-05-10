@@ -13,6 +13,33 @@ import {
 } from './dto/product.dto';
 import { CacheService } from '../../shared/services/cache.service';
 
+/**
+ * Response shape for the scanner mobile app's variant lookup endpoints.
+ * Stock is NOT bundled here — the client fetches `/inventory/levels/:id`
+ * separately so this payload stays cacheable. Prices are in MINOR units
+ * (kobo / cents) returned as strings (Postgres bigint -> JS would lose
+ * precision past 2^53, and we treat them as opaque integer strings on
+ * the client).
+ */
+export interface VariantLookupResult {
+  id: string;
+  productId: string;
+  productName: string;
+  productSlug: string;
+  variantName: string | null;
+  sku: string;
+  barcode: string | null;
+  price: {
+    retailNgn: string;
+    retailUsd: string;
+    wholesaleNgn: string;
+    wholesaleUsd: string;
+  };
+  options: Record<string, string> | null;
+  imageUrl: string | null;
+  isActive: boolean;
+}
+
 @Injectable()
 export class ProductsService {
   constructor(
@@ -280,6 +307,128 @@ export class ProductsService {
 
     await this.cache.set(cacheKey, product, CacheService.TTL.PRODUCT_DETAIL);
     return product;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Variant lookup (scanner mobile app, POS quick-scan)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Look up a single variant by SKU. Returns variant identity + parent
+   * product context + price + first image. Does NOT include stock — the
+   * caller is expected to fetch /inventory/levels/:variantId in parallel
+   * so the variant payload remains cacheable.
+   *
+   * Throws NotFoundException if the SKU does not match an active variant
+   * on an active, non-deleted product.
+   */
+  async findVariantBySku(sku: string): Promise<VariantLookupResult> {
+    const trimmed = sku.trim();
+    if (!trimmed) {
+      throw new NotFoundException('Variant not found');
+    }
+    return this.runVariantLookup({ sku: trimmed });
+  }
+
+  /**
+   * Look up a single variant by barcode. Same shape as findVariantBySku.
+   * Barcodes are nullable on variants — only barcoded variants are
+   * resolvable through this path.
+   */
+  async findVariantByBarcode(barcode: string): Promise<VariantLookupResult> {
+    const trimmed = barcode.trim();
+    if (!trimmed) {
+      throw new NotFoundException('Variant not found');
+    }
+    return this.runVariantLookup({ barcode: trimmed });
+  }
+
+  /**
+   * Internal: shared query path for SKU and barcode lookup. Uses a single
+   * SELECT joining product + first media row, scoped to active rows on
+   * both the variant and the product.
+   */
+  private async runVariantLookup(
+    where: { sku?: string; barcode?: string },
+  ): Promise<VariantLookupResult> {
+    const qb = this.variantRepo
+      .createQueryBuilder('v')
+      .innerJoin('products', 'p', 'p.id = v."productId" AND p."deletedAt" IS NULL AND p."isActive" = true')
+      .leftJoin(
+        'product_media',
+        'm',
+        'm."productId" = p.id AND m."deletedAt" IS NULL',
+      )
+      .where('v."deletedAt" IS NULL')
+      .andWhere('v."isActive" = true');
+
+    if (where.sku) {
+      qb.andWhere('v.sku = :sku', { sku: where.sku });
+    } else if (where.barcode) {
+      qb.andWhere('v.barcode = :barcode', { barcode: where.barcode });
+    } else {
+      throw new NotFoundException('Variant not found');
+    }
+
+    qb.select([
+      'v.id              AS "id"',
+      'v."productId"     AS "productId"',
+      'v.sku             AS "sku"',
+      'v.barcode         AS "barcode"',
+      'v.name            AS "variantName"',
+      'v."retailPriceNgn"  AS "retailPriceNgn"',
+      'v."retailPriceUsd"  AS "retailPriceUsd"',
+      'v."wholesalePriceNgn" AS "wholesalePriceNgn"',
+      'v."wholesalePriceUsd" AS "wholesalePriceUsd"',
+      'v.options         AS "options"',
+      'v."isActive"      AS "isActive"',
+      'p.name            AS "productName"',
+      'p.slug            AS "productSlug"',
+      'm.url             AS "imageUrl"',
+    ])
+      .orderBy('m."sortOrder"', 'ASC')
+      .addOrderBy('m."createdAt"', 'ASC')
+      .limit(1);
+
+    const row = await qb.getRawOne<{
+      id: string;
+      productId: string;
+      sku: string;
+      barcode: string | null;
+      variantName: string | null;
+      retailPriceNgn: string;
+      retailPriceUsd: string;
+      wholesalePriceNgn: string;
+      wholesalePriceUsd: string;
+      options: Record<string, string> | null;
+      isActive: boolean;
+      productName: string;
+      productSlug: string;
+      imageUrl: string | null;
+    }>();
+
+    if (!row) {
+      throw new NotFoundException('Variant not found');
+    }
+
+    return {
+      id: row.id,
+      productId: row.productId,
+      productName: row.productName,
+      productSlug: row.productSlug,
+      variantName: row.variantName ?? null,
+      sku: row.sku,
+      barcode: row.barcode ?? null,
+      price: {
+        retailNgn: row.retailPriceNgn,
+        retailUsd: row.retailPriceUsd,
+        wholesaleNgn: row.wholesalePriceNgn,
+        wholesaleUsd: row.wholesalePriceUsd,
+      },
+      options: row.options ?? null,
+      imageUrl: row.imageUrl ?? null,
+      isActive: row.isActive,
+    };
   }
 
   // ── Update ──

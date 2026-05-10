@@ -11,6 +11,7 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  Header,
 } from '@nestjs/common';
 import { ProductsService } from './products.service';
 import {
@@ -21,6 +22,8 @@ import {
 } from './dto/product.dto';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { Public } from '../../shared/decorators/public.decorator';
+import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
+import { Permission } from '../users/entities/role.entity';
 
 @Controller({ path: 'products', version: '1' })
 @UseGuards(JwtAuthGuard)
@@ -55,6 +58,30 @@ export class ProductsController {
   async findBySlug(@Param('slug') slug: string) {
     const product = await this.productsService.findBySlug(slug);
     return { data: product };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Variant lookup (scanner mobile app, POS quick-scan)
+  //
+  // Cacheable: variant identity rarely changes; stock comes from
+  // /inventory/levels/:variantId so this payload can sit in HTTP cache
+  // for a minute without staleness affecting checkout decisions.
+  // ─────────────────────────────────────────────────────────────
+
+  @Get('variants/by-sku/:code')
+  @RequirePermissions(Permission.PRODUCTS_READ)
+  @Header('Cache-Control', 'private, max-age=60')
+  async findVariantBySku(@Param('code') code: string) {
+    const variant = await this.productsService.findVariantBySku(code);
+    return { data: variant };
+  }
+
+  @Get('variants/by-barcode/:code')
+  @RequirePermissions(Permission.PRODUCTS_READ)
+  @Header('Cache-Control', 'private, max-age=60')
+  async findVariantByBarcode(@Param('code') code: string) {
+    const variant = await this.productsService.findVariantByBarcode(code);
+    return { data: variant };
   }
 
   // ── Admin: Get Product by ID (optionally includes soft-deleted) ──
