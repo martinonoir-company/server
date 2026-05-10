@@ -1,7 +1,25 @@
 import { Controller, Post, Get, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
-import { InventoryService, RecordMovementInput } from './inventory.service';
+import {
+  InventoryService,
+  RecordMovementInput,
+  RecordMovementBatchLine,
+} from './inventory.service';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
-import { IsString, IsNumber, IsEnum, IsOptional, Min, IsBoolean } from 'class-validator';
+import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
+import { Permission } from '../users/entities/role.entity';
+import {
+  IsString,
+  IsNumber,
+  IsEnum,
+  IsOptional,
+  Min,
+  IsBoolean,
+  IsArray,
+  ValidateNested,
+  ArrayMinSize,
+  ArrayMaxSize,
+  IsUUID,
+} from 'class-validator';
 import { MovementKind } from './entities/inventory.entity';
 import { Type } from 'class-transformer';
 
@@ -13,6 +31,28 @@ export class RecordMovementDto {
   @IsOptional() @IsString() referenceId?: string;
   @IsOptional() @IsString() referenceType?: string;
   @IsOptional() @IsString() reason?: string;
+}
+
+/** One line in a batch movements request. */
+export class RecordMovementBatchLineDto {
+  @IsUUID() clientLineId!: string;
+  @IsString() variantId!: string;
+  @IsEnum(MovementKind) kind!: MovementKind;
+  @IsNumber() @Min(1) quantity!: number;
+  @IsOptional() @IsString() warehouseCode?: string;
+  @IsOptional() @IsString() referenceId?: string;
+  @IsOptional() @IsString() referenceType?: string;
+  @IsOptional() @IsString() reason?: string;
+}
+
+/** Batch movements payload. */
+export class RecordMovementBatchDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => RecordMovementBatchLineDto)
+  lines!: RecordMovementBatchLineDto[];
 }
 
 export class StockLevelQueryDto {
@@ -40,6 +80,38 @@ export class InventoryController {
     };
     const movement = await this.inventoryService.recordMovement(input);
     return { data: movement };
+  }
+
+  /**
+   * Batch record stock movements (scanner mobile app: restock / returns).
+   * All lines processed in ONE transaction — all succeed or all roll back.
+   * Per-line idempotency via `clientLineId` (UUID).
+   *
+   * Requires `inventory:adjust`. COMPANY_STAFF gained this permission in
+   * SCANNER_APP_PLAN.md PR #4.
+   */
+  @Post('movements/batch')
+  @RequirePermissions(Permission.INVENTORY_ADJUST)
+  async recordMovementsBatch(
+    @Body() dto: RecordMovementBatchDto,
+    @Request() req: any,
+  ) {
+    const createdBy: string | undefined = req.user?.id ?? req.user?.sub;
+    const lines: RecordMovementBatchLine[] = dto.lines.map((l) => ({
+      clientLineId: l.clientLineId,
+      variantId: l.variantId,
+      kind: l.kind,
+      quantity: l.quantity,
+      warehouseCode: l.warehouseCode,
+      referenceId: l.referenceId,
+      referenceType: l.referenceType,
+      reason: l.reason,
+    }));
+    const result = await this.inventoryService.recordMovementsBatch(
+      lines,
+      createdBy,
+    );
+    return { data: result };
   }
 
   /**

@@ -7,7 +7,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, EntityManager } from 'typeorm';
 import { StockMovement, StockLevel, MovementKind } from './entities/inventory.entity';
 import { CacheService } from '../../shared/services/cache.service';
 
@@ -34,6 +34,38 @@ export interface RecordMovementInput {
   referenceType?: string;
   reason?: string;
   createdBy?: string;
+  /**
+   * Optional client-side idempotency key (UUID) for the batch endpoint.
+   * If supplied and a movement with this key already exists, the existing
+   * row is returned and no stock change occurs.
+   */
+  clientLineId?: string;
+}
+
+/** One line in a batch movements request. Same fields as a single. */
+export interface RecordMovementBatchLine {
+  clientLineId: string;
+  variantId: string;
+  kind: MovementKind;
+  quantity: number;
+  warehouseCode?: string;
+  referenceId?: string;
+  referenceType?: string;
+  reason?: string;
+}
+
+/** Outcome of one line in a batch. */
+export interface RecordMovementBatchLineResult {
+  clientLineId: string;
+  status: 'ACCEPTED' | 'DEDUPLICATED';
+  movementId: string;
+}
+
+/** Aggregate result of a batch call. */
+export interface RecordMovementBatchResult {
+  accepted: number;
+  deduplicated: number;
+  lines: RecordMovementBatchLineResult[];
 }
 
 @Injectable()
@@ -66,15 +98,53 @@ export class InventoryService {
    *   the original movement is returned and no stock change occurs.
    */
   async recordMovement(input: RecordMovementInput): Promise<StockMovement> {
+    const movement = await this.dataSource.transaction(async (manager) => {
+      const result = await this.recordMovementOnManager(manager, input);
+      return result.movement;
+    });
+
+    // Cache invalidation outside the transaction — non-critical, eventual.
+    if (this.cacheService) {
+      await this.cacheService.invalidateStock(input.variantId);
+    }
+
+    return movement;
+  }
+
+  /**
+   * Same logical work as `recordMovement` but operates inside a caller-
+   * supplied EntityManager. The batch endpoint uses this so all lines in
+   * a request share one transaction (all-or-nothing semantics).
+   *
+   * Returns both the persisted movement AND a `deduplicated` flag so the
+   * caller can report per-line outcomes.
+   */
+  async recordMovementOnManager(
+    manager: EntityManager,
+    input: RecordMovementInput,
+  ): Promise<{ movement: StockMovement; deduplicated: boolean }> {
     if (input.quantity <= 0) {
       throw new BadRequestException('Quantity must be positive');
     }
 
     const warehouse = input.warehouseCode ?? 'DEFAULT';
 
-    // ── 1. IDEMPOTENCY CHECK ──
+    // ── 1a. IDEMPOTENCY: clientLineId-based (batch endpoint) ──
+    if (input.clientLineId) {
+      const existing = await manager.findOne(StockMovement, {
+        where: { clientLineId: input.clientLineId },
+      });
+      if (existing) {
+        this.logger.debug(
+          `Idempotent skip (clientLineId): variant=${input.variantId} clientLineId=${input.clientLineId}`,
+        );
+        return { movement: existing, deduplicated: true };
+      }
+    }
+
+    // ── 1b. IDEMPOTENCY: reference-tuple-based (legacy path) ──
     if (input.referenceId && input.referenceType) {
-      const existing = await this.movementRepo.findOne({
+      const existing = await manager.findOne(StockMovement, {
         where: {
           referenceId: input.referenceId,
           referenceType: input.referenceType,
@@ -84,139 +154,217 @@ export class InventoryService {
       });
       if (existing) {
         this.logger.debug(
-          `Idempotent skip: ${input.kind} for variant=${input.variantId} ref=${input.referenceId}`,
+          `Idempotent skip (reference): ${input.kind} for variant=${input.variantId} ref=${input.referenceId}`,
         );
-        return existing;
+        return { movement: existing, deduplicated: true };
       }
     }
 
-    // ── 2–4: TRANSACTION (READ COMMITTED — no serializable, no locks) ──
-    // Wrapping upsert + conditional update + movement insert in one transaction
-    // ensures that if the movement insert fails (e.g. duplicate via unique index),
-    // the stock level change is rolled back automatically.
-    const movement = await this.dataSource.transaction(async (manager) => {
-      // 2. ENSURE StockLevel ROW EXISTS (upsert)
+    // ── 2. ENSURE StockLevel ROW EXISTS (upsert) ──
+    await manager
+      .createQueryBuilder()
+      .insert()
+      .into(StockLevel)
+      .values({
+        variantId: input.variantId,
+        warehouseCode: warehouse,
+        onHand: 0,
+        reserved: 0,
+      })
+      .orIgnore() // INSERT ... ON CONFLICT DO NOTHING
+      .execute();
+
+    // ── 3. ATOMIC STOCK UPDATE (conditional where needed) ──
+    if (INBOUND_KINDS.has(input.kind)) {
+      // Inbound: always succeeds (stock goes up)
       await manager
         .createQueryBuilder()
-        .insert()
-        .into(StockLevel)
-        .values({
-          variantId: input.variantId,
-          warehouseCode: warehouse,
-          onHand: 0,
-          reserved: 0,
+        .update(StockLevel)
+        .set({
+          onHand: () => `"onHand" + :qty`,
+          lastMovementAt: new Date(),
         })
-        .orIgnore()          // INSERT ... ON CONFLICT DO NOTHING
+        .where('"variantId" = :variantId AND "warehouseCode" = :wh', {
+          variantId: input.variantId,
+          wh: warehouse,
+          qty: input.quantity,
+        })
+        .execute();
+    } else if (OUTBOUND_KINDS.has(input.kind)) {
+      // Outbound: conditional — only if sufficient stock
+      const result = await manager
+        .createQueryBuilder()
+        .update(StockLevel)
+        .set({
+          onHand: () => `"onHand" - :qty`,
+          lastMovementAt: new Date(),
+        })
+        .where(
+          '"variantId" = :variantId AND "warehouseCode" = :wh AND "onHand" >= :qty',
+          {
+            variantId: input.variantId,
+            wh: warehouse,
+            qty: input.quantity,
+          },
+        )
         .execute();
 
-      // 3. ATOMIC STOCK UPDATE (conditional where needed)
-      if (INBOUND_KINDS.has(input.kind)) {
-        // Inbound: always succeeds (stock goes up)
-        await manager
-          .createQueryBuilder()
-          .update(StockLevel)
-          .set({
-            onHand: () => `"onHand" + :qty`,
-            lastMovementAt: new Date(),
-          })
-          .where('"variantId" = :variantId AND "warehouseCode" = :wh', {
-            variantId: input.variantId,
-            wh: warehouse,
-            qty: input.quantity,
-          })
-          .execute();
-      } else if (OUTBOUND_KINDS.has(input.kind)) {
-        // Outbound: conditional — only if sufficient stock
-        const result = await manager
-          .createQueryBuilder()
-          .update(StockLevel)
-          .set({
-            onHand: () => `"onHand" - :qty`,
-            lastMovementAt: new Date(),
-          })
-          .where(
-            '"variantId" = :variantId AND "warehouseCode" = :wh AND "onHand" >= :qty',
-            {
-              variantId: input.variantId,
-              wh: warehouse,
-              qty: input.quantity,
-            },
-          )
-          .execute();
-
-        if (result.affected === 0) {
-          const level = await manager.findOne(StockLevel, {
-            where: { variantId: input.variantId, warehouseCode: warehouse },
-          });
-          throw new ConflictException(
-            `Insufficient stock for variant ${input.variantId}: have ${level?.onHand ?? 0}, need ${input.quantity}`,
-          );
-        }
-      } else if (input.kind === MovementKind.RESERVATION) {
-        // Reserve: conditional — only if enough available (onHand - reserved)
-        const result = await manager
-          .createQueryBuilder()
-          .update(StockLevel)
-          .set({
-            reserved: () => `"reserved" + :qty`,
-            lastMovementAt: new Date(),
-          })
-          .where(
-            '"variantId" = :variantId AND "warehouseCode" = :wh AND ("onHand" - "reserved") >= :qty',
-            {
-              variantId: input.variantId,
-              wh: warehouse,
-              qty: input.quantity,
-            },
-          )
-          .execute();
-
-        if (result.affected === 0) {
-          const level = await manager.findOne(StockLevel, {
-            where: { variantId: input.variantId, warehouseCode: warehouse },
-          });
-          const available = level ? level.onHand - level.reserved : 0;
-          throw new ConflictException(
-            `Insufficient available stock for variant ${input.variantId}: available ${available}, need ${input.quantity}`,
-          );
-        }
-      } else if (input.kind === MovementKind.RELEASE) {
-        // Release: always succeeds, clamp to zero
-        await manager
-          .createQueryBuilder()
-          .update(StockLevel)
-          .set({
-            reserved: () => `GREATEST(0, "reserved" - :qty)`,
-            lastMovementAt: new Date(),
-          })
-          .where('"variantId" = :variantId AND "warehouseCode" = :wh', {
-            variantId: input.variantId,
-            wh: warehouse,
-            qty: input.quantity,
-          })
-          .execute();
+      if (result.affected === 0) {
+        const level = await manager.findOne(StockLevel, {
+          where: { variantId: input.variantId, warehouseCode: warehouse },
+        });
+        throw new ConflictException(
+          `Insufficient stock for variant ${input.variantId}: have ${level?.onHand ?? 0}, need ${input.quantity}`,
+        );
       }
+    } else if (input.kind === MovementKind.RESERVATION) {
+      // Reserve: conditional — only if enough available (onHand - reserved)
+      const result = await manager
+        .createQueryBuilder()
+        .update(StockLevel)
+        .set({
+          reserved: () => `"reserved" + :qty`,
+          lastMovementAt: new Date(),
+        })
+        .where(
+          '"variantId" = :variantId AND "warehouseCode" = :wh AND ("onHand" - "reserved") >= :qty',
+          {
+            variantId: input.variantId,
+            wh: warehouse,
+            qty: input.quantity,
+          },
+        )
+        .execute();
 
-      // 4. APPEND IMMUTABLE MOVEMENT
-      const mvt = manager.create(StockMovement, {
-        variantId: input.variantId,
-        kind: input.kind,
-        quantity: input.quantity,
-        warehouseCode: warehouse,
-        referenceId: input.referenceId,
-        referenceType: input.referenceType,
-        reason: input.reason,
-        createdBy: input.createdBy,
-      });
-      return manager.save(StockMovement, mvt);
-    });
-
-    // ── 5. INVALIDATE CACHE (outside transaction — non-critical) ──
-    if (this.cacheService) {
-      await this.cacheService.invalidateStock(input.variantId);
+      if (result.affected === 0) {
+        const level = await manager.findOne(StockLevel, {
+          where: { variantId: input.variantId, warehouseCode: warehouse },
+        });
+        const available = level ? level.onHand - level.reserved : 0;
+        throw new ConflictException(
+          `Insufficient available stock for variant ${input.variantId}: available ${available}, need ${input.quantity}`,
+        );
+      }
+    } else if (input.kind === MovementKind.RELEASE) {
+      // Release: always succeeds, clamp to zero
+      await manager
+        .createQueryBuilder()
+        .update(StockLevel)
+        .set({
+          reserved: () => `GREATEST(0, "reserved" - :qty)`,
+          lastMovementAt: new Date(),
+        })
+        .where('"variantId" = :variantId AND "warehouseCode" = :wh', {
+          variantId: input.variantId,
+          wh: warehouse,
+          qty: input.quantity,
+        })
+        .execute();
     }
 
-    return movement;
+    // ── 4. APPEND IMMUTABLE MOVEMENT ──
+    const mvt = manager.create(StockMovement, {
+      variantId: input.variantId,
+      kind: input.kind,
+      quantity: input.quantity,
+      warehouseCode: warehouse,
+      referenceId: input.referenceId,
+      referenceType: input.referenceType,
+      reason: input.reason,
+      createdBy: input.createdBy,
+      clientLineId: input.clientLineId,
+    });
+    const saved = await manager.save(StockMovement, mvt);
+
+    return { movement: saved, deduplicated: false };
+  }
+
+  /**
+   * Batch movements: process N lines in ONE transaction. All-or-nothing —
+   * if any line fails (insufficient stock, validation error), the entire
+   * batch rolls back. Per-line idempotency via `clientLineId`.
+   *
+   * Used by the scanner mobile app's restock and returns flows where a
+   * single supplier delivery / return run produces dozens of lines.
+   *
+   * Cache invalidation runs once after commit, deduped by variantId.
+   */
+  async recordMovementsBatch(
+    lines: RecordMovementBatchLine[],
+    createdBy: string | undefined,
+  ): Promise<RecordMovementBatchResult> {
+    if (!lines || lines.length === 0) {
+      throw new BadRequestException('At least one line is required');
+    }
+    if (lines.length > 500) {
+      // Defensive cap — a typical scanner batch is 1–50. Rejecting >500
+      // protects against runaway clients without changing realistic flows.
+      throw new BadRequestException('Batch size exceeds maximum (500 lines)');
+    }
+
+    // Defensive: reject duplicate clientLineIds within the same request.
+    // The DB unique index would catch it, but a clearer error here helps
+    // the client report which line is the offender before any work runs.
+    const seen = new Set<string>();
+    for (const line of lines) {
+      if (!line.clientLineId) {
+        throw new BadRequestException('Every batch line requires a clientLineId');
+      }
+      if (seen.has(line.clientLineId)) {
+        throw new BadRequestException(
+          `Duplicate clientLineId in request: ${line.clientLineId}`,
+        );
+      }
+      seen.add(line.clientLineId);
+    }
+
+    const results: RecordMovementBatchLineResult[] = [];
+    let acceptedCount = 0;
+    let deduplicatedCount = 0;
+
+    await this.dataSource.transaction(async (manager) => {
+      for (const line of lines) {
+        const { movement, deduplicated } = await this.recordMovementOnManager(
+          manager,
+          {
+            variantId: line.variantId,
+            kind: line.kind,
+            quantity: line.quantity,
+            warehouseCode: line.warehouseCode,
+            referenceId: line.referenceId,
+            referenceType: line.referenceType,
+            reason: line.reason,
+            createdBy,
+            clientLineId: line.clientLineId,
+          },
+        );
+
+        results.push({
+          clientLineId: line.clientLineId,
+          status: deduplicated ? 'DEDUPLICATED' : 'ACCEPTED',
+          movementId: movement.id,
+        });
+
+        if (deduplicated) deduplicatedCount++;
+        else acceptedCount++;
+      }
+    });
+
+    // Invalidate cache once per unique variant (post-commit).
+    if (this.cacheService) {
+      const uniqueVariantIds = new Set(lines.map((l) => l.variantId));
+      await Promise.all(
+        Array.from(uniqueVariantIds).map((vid) =>
+          this.cacheService!.invalidateStock(vid),
+        ),
+      );
+    }
+
+    return {
+      accepted: acceptedCount,
+      deduplicated: deduplicatedCount,
+      lines: results,
+    };
   }
 
   /**
