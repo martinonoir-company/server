@@ -121,6 +121,13 @@ export class BranchesController {
 
   // ── Staff assignments ──
 
+  @Get(':id/staff')
+  @RequirePermissions(Permission.BRANCHES_MANAGE)
+  async listStaff(@Param('id') id: string) {
+    const staff = await this.branchesService.listStaff(id);
+    return { data: staff };
+  }
+
   @Post(':id/staff')
   @RequirePermissions(Permission.BRANCHES_MANAGE)
   async assignStaff(@Param('id') id: string, @Body() dto: AssignStaffDto) {

@@ -265,6 +265,54 @@ export class BranchesService {
   // STAFF ASSIGNMENTS
   // ─────────────────────────────────────────────────────────────
 
+  /**
+   * List staff currently assigned to a branch. Returns lightweight user
+   * details suitable for an admin "assigned members" panel.
+   */
+  async listStaff(branchId: string): Promise<
+    Array<{
+      assignmentId: string;
+      userId: string;
+      firstName: string;
+      lastName: string;
+      email: string;
+      role: UserRole;
+      assignedAt: Date;
+    }>
+  > {
+    const branch = await this.branchRepo.findOne({
+      where: { id: branchId, deletedAt: IsNull() },
+    });
+    if (!branch) throw new NotFoundException('Branch not found');
+
+    const rows = await this.userBranchRepo
+      .createQueryBuilder('ub')
+      .innerJoin('users', 'u', 'u.id = ub."userId" AND u."deletedAt" IS NULL')
+      .where('ub."branchId" = :branchId', { branchId })
+      .andWhere('ub."deletedAt" IS NULL')
+      .orderBy('ub."createdAt"', 'ASC')
+      .select([
+        'ub.id            AS "assignmentId"',
+        'ub."userId"      AS "userId"',
+        'u."firstName"    AS "firstName"',
+        'u."lastName"     AS "lastName"',
+        'u.email          AS "email"',
+        'u.role           AS "role"',
+        'ub."createdAt"   AS "assignedAt"',
+      ])
+      .getRawMany();
+
+    return rows.map((r) => ({
+      assignmentId: r.assignmentId,
+      userId: r.userId,
+      firstName: r.firstName,
+      lastName: r.lastName,
+      email: r.email,
+      role: r.role as UserRole,
+      assignedAt: r.assignedAt,
+    }));
+  }
+
   async assignStaff(branchId: string, userId: string): Promise<UserBranch> {
     const branch = await this.branchRepo.findOne({ where: { id: branchId, deletedAt: IsNull() } });
     if (!branch) throw new NotFoundException('Branch not found');
