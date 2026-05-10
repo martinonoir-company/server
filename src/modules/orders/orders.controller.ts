@@ -11,11 +11,19 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service';
-import { CreateOrderDto, UpdateOrderStatusDto, OrderQueryDto } from './dto/order.dto';
+import {
+  CreateOrderDto,
+  UpdateOrderStatusDto,
+  OrderQueryDto,
+  DispatchOrderDto,
+  MarkDeliveredDto,
+} from './dto/order.dto';
 import { PricingEngine, QuoteItem, QuoteContext } from './pricing.engine';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { CurrentUser } from '../../shared/decorators/current-user.decorator';
 import { Public } from '../../shared/decorators/public.decorator';
+import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
+import { Permission } from '../users/entities/role.entity';
 import { User } from '../users/entities/user.entity';
 import { IsArray, IsObject, IsString, IsNumber, IsOptional, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -112,14 +120,48 @@ export class OrdersController {
     return { data: order };
   }
 
-  // ── Transition Status ──
+  // ── Transition Status (generic admin path) ──
   @Patch(':id/status')
+  @RequirePermissions(Permission.ORDERS_UPDATE)
   async updateStatus(
     @Param('id') id: string,
     @Body() dto: UpdateOrderStatusDto,
     @CurrentUser() user?: User,
   ) {
     const order = await this.ordersService.transitionStatus(id, dto, user?.id);
+    return { data: order };
+  }
+
+  // ── Dispatch (scanner mobile app) ──
+  //
+  // PROCESSING → SHIPPED with required trackingNumber + carrier + per-line
+  // scanned quantity verification. Mirrors the FSM but enforces business
+  // rules the generic /status path doesn't (qty match, tracking fields).
+  @Post(':id/dispatch')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(Permission.ORDERS_UPDATE)
+  async dispatch(
+    @Param('id') id: string,
+    @Body() dto: DispatchOrderDto,
+    @CurrentUser() user?: User,
+  ) {
+    const order = await this.ordersService.dispatchOrder(id, dto, user?.id);
+    return { data: order };
+  }
+
+  // ── Mark Delivered ──
+  //
+  // SHIPPED → DELIVERED. Sets deliveredAt and fires the delivered email.
+  // Idempotent: already-DELIVERED orders return as-is.
+  @Post(':id/delivered')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(Permission.ORDERS_UPDATE)
+  async markDelivered(
+    @Param('id') id: string,
+    @Body() dto: MarkDeliveredDto,
+    @CurrentUser() user?: User,
+  ) {
+    const order = await this.ordersService.markDelivered(id, dto, user?.id);
     return { data: order };
   }
 }

@@ -150,6 +150,19 @@ export class Order extends BaseEntity {
   @Column({ type: 'varchar', length: 64, nullable: true })
   idempotencyKey?: string;
 
+  // ── Shipment / Delivery ──
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  trackingNumber?: string;
+
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  carrier?: string;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  shippedAt?: Date;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  deliveredAt?: Date;
+
   // ── Notes ──
   @Column({ type: 'text', nullable: true })
   customerNote?: string;

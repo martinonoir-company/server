@@ -263,6 +263,32 @@ ${content}
     return this.send({ to, subject: `Your Order ${orderNumber} Has Shipped! 📦`, html: this.brandedLayout(content) });
   }
 
+  // ── Template: Order Delivered ──
+
+  async sendOrderDelivered(
+    to: string,
+    orderNumber: string,
+  ): Promise<EmailResult> {
+    const content = `
+      <div style="text-align:center;margin-bottom:24px;">
+        <div style="width:56px;height:56px;background:#E6F4EC;border-radius:50%;margin:0 auto 16px;line-height:56px;font-size:28px;">✅</div>
+        <h1 style="margin:0;font-size:24px;color:#0a0a0a;">Your Order Has Been Delivered!</h1>
+        <p style="margin:8px 0 0;color:#5A6775;">Order <strong>${orderNumber}</strong> has arrived</p>
+      </div>
+      <p style="color:#5A6775;font-size:13px;line-height:1.6;">
+        Thank you for shopping with Martino Noir. We hope you love your purchase. If anything isn't right, you can request a return within 30 days from your account.
+      </p>
+      <div style="text-align:center;margin:24px 0;">
+        <a href="${process.env['FRONTEND_URL'] ?? 'http://localhost:3000'}/account" style="display:inline-block;background:#0a0a0a;color:#fff;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;">View My Orders</a>
+      </div>`;
+
+    return this.send({
+      to,
+      subject: `Order ${orderNumber} Delivered — Thank you! ✨`,
+      html: this.brandedLayout(content),
+    });
+  }
+
   // ── Template: Password Reset ──
 
   async sendPasswordReset(to: string, resetToken: string, expiresInMinutes: number): Promise<EmailResult> {

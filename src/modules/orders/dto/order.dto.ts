@@ -71,6 +71,53 @@ export class UpdateOrderStatusDto {
   reason?: string;
 }
 
+/** One line in a dispatch payload: links a scanned qty to an order item. */
+export class DispatchOrderItemDto {
+  @IsString()
+  orderItemId!: string;
+
+  @IsNumber()
+  @Min(1)
+  scannedQty!: number;
+}
+
+/**
+ * Body for POST /orders/:id/dispatch — scanner mobile app confirms a
+ * physical handoff to the courier. Tracking number and carrier are
+ * required; per-line scanned quantities must match the order's ordered
+ * quantities (server-side validation).
+ */
+export class DispatchOrderDto {
+  @IsString()
+  @MaxLength(100)
+  trackingNumber!: string;
+
+  @IsString()
+  @MaxLength(100)
+  carrier!: string;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => DispatchOrderItemDto)
+  items!: DispatchOrderItemDto[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
+}
+
+/**
+ * Body for POST /orders/:id/delivered — courier confirms delivery, or an
+ * admin marks delivery manually.
+ */
+export class MarkDeliveredDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
+}
+
 export class OrderQueryDto {
   @IsOptional() @IsEnum(OrderStatus) status?: OrderStatus;
   @IsOptional() @IsString() userId?: string;

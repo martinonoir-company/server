@@ -15,7 +15,13 @@ import { MovementKind } from '../inventory/entities/inventory.entity';
 import { CartService } from '../cart/cart.service';
 import { EmailService } from '../notifications/email.service';
 import { User } from '../users/entities/user.entity';
-import { CreateOrderDto, UpdateOrderStatusDto, OrderQueryDto } from './dto/order.dto';
+import {
+  CreateOrderDto,
+  UpdateOrderStatusDto,
+  OrderQueryDto,
+  DispatchOrderDto,
+  MarkDeliveredDto,
+} from './dto/order.dto';
 
 @Injectable()
 export class OrdersService {
@@ -278,6 +284,234 @@ export class OrdersService {
 
       return updated;
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Dispatch & Delivery (scanner mobile app)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Confirm physical handoff to the courier.
+   *
+   *  - Order must be in PROCESSING.
+   *  - Every order item's `scannedQty` must equal the item's ordered
+   *    `quantity` — partial dispatches are rejected (422) with the list
+   *    of mismatched lines so the UI can highlight them.
+   *  - On success: trackingNumber, carrier, shippedAt persisted;
+   *    transitions to SHIPPED via the same FSM path the admin uses
+   *    (history row written, shipping email fired with tracking info).
+   *
+   * Idempotency: if the order is already SHIPPED with a tracking number,
+   * the call is a no-op and returns the current order — safe to retry.
+   */
+  async dispatchOrder(
+    orderId: string,
+    dto: DispatchOrderDto,
+    staffId?: string,
+  ): Promise<Order> {
+    const order = await this.findOne(orderId);
+
+    // Idempotent retry: already shipped with the same tracking number.
+    if (
+      order.status === OrderStatus.SHIPPED &&
+      order.trackingNumber === dto.trackingNumber &&
+      order.carrier === dto.carrier
+    ) {
+      this.logger.debug(
+        `Idempotent dispatch: order ${order.orderNumber} already shipped with ${dto.trackingNumber}`,
+      );
+      return order;
+    }
+
+    // State guard: must be in PROCESSING.
+    if (order.status !== OrderStatus.PROCESSING) {
+      throw new BadRequestException(
+        `Cannot dispatch order in status ${order.status}. Order must be in PROCESSING.`,
+      );
+    }
+
+    // Quantity guard: every item must be fully scanned.
+    const byItemId = new Map(order.items.map((i) => [i.id, i]));
+    const mismatches: Array<{
+      orderItemId: string;
+      sku: string;
+      ordered: number;
+      scanned: number;
+    }> = [];
+    const seen = new Set<string>();
+
+    for (const line of dto.items) {
+      if (seen.has(line.orderItemId)) {
+        throw new BadRequestException(
+          `Duplicate orderItemId in dispatch payload: ${line.orderItemId}`,
+        );
+      }
+      seen.add(line.orderItemId);
+
+      const item = byItemId.get(line.orderItemId);
+      if (!item) {
+        throw new BadRequestException(
+          `orderItemId ${line.orderItemId} does not belong to order ${order.orderNumber}`,
+        );
+      }
+      if (line.scannedQty !== item.quantity) {
+        mismatches.push({
+          orderItemId: item.id,
+          sku: item.sku,
+          ordered: item.quantity,
+          scanned: line.scannedQty,
+        });
+      }
+    }
+
+    // Missing items: any order item not represented in the payload.
+    for (const item of order.items) {
+      if (!seen.has(item.id)) {
+        mismatches.push({
+          orderItemId: item.id,
+          sku: item.sku,
+          ordered: item.quantity,
+          scanned: 0,
+        });
+      }
+    }
+
+    if (mismatches.length > 0) {
+      throw new ConflictException({
+        error: 'DISPATCH_QUANTITY_MISMATCH',
+        message:
+          'Every order item must be fully scanned before dispatch. Resolve the mismatched lines.',
+        mismatches,
+      });
+    }
+
+    // All checks passed — persist tracking + transition status atomically.
+    return this.dataSource.transaction(async (manager) => {
+      const shippedAt = new Date();
+
+      // Persist tracking metadata + status in one UPDATE.
+      await manager.update(Order, order.id, {
+        trackingNumber: dto.trackingNumber,
+        carrier: dto.carrier,
+        shippedAt,
+        status: OrderStatus.SHIPPED,
+      });
+
+      // Status history row — preserves audit trail just like the FSM path.
+      const history = manager.create(OrderStatusHistory, {
+        orderId: order.id,
+        fromStatus: OrderStatus.PROCESSING,
+        toStatus: OrderStatus.SHIPPED,
+        changedBy: staffId,
+        reason: dto.note
+          ? `Dispatched via ${dto.carrier} (${dto.trackingNumber}) — ${dto.note}`
+          : `Dispatched via ${dto.carrier} (${dto.trackingNumber})`,
+      });
+      await manager.save(OrderStatusHistory, history);
+
+      // Reload the canonical view.
+      const updated = await manager.findOneOrFail(Order, {
+        where: { id: order.id },
+        relations: ['items', 'statusHistory', 'user'],
+        order: { statusHistory: { createdAt: 'ASC' } },
+      });
+
+      // Fire shipping email outside the critical path. Now it can include
+      // the real tracking number and carrier — the existing
+      // sendShippingNotification signature already accepts both.
+      this.sendShippingEmailWithTracking(updated).catch((err) =>
+        this.logger.error(
+          `Shipping notification email failed for ${updated.orderNumber}: ${err.message}`,
+        ),
+      );
+
+      return updated;
+    });
+  }
+
+  /**
+   * Mark a shipment delivered.
+   *
+   *  - Order must be in SHIPPED.
+   *  - Sets deliveredAt; transitions to DELIVERED via the FSM with a
+   *    history row.
+   *  - Sends a delivered email to the customer (or guest).
+   *
+   * Idempotent: already-DELIVERED orders return as-is.
+   */
+  async markDelivered(
+    orderId: string,
+    dto: MarkDeliveredDto,
+    staffId?: string,
+  ): Promise<Order> {
+    const order = await this.findOne(orderId);
+
+    if (order.status === OrderStatus.DELIVERED) {
+      this.logger.debug(
+        `Idempotent delivered: order ${order.orderNumber} already delivered`,
+      );
+      return order;
+    }
+
+    if (order.status !== OrderStatus.SHIPPED) {
+      throw new BadRequestException(
+        `Cannot mark delivered: order ${order.orderNumber} is in status ${order.status}, expected SHIPPED.`,
+      );
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const deliveredAt = new Date();
+
+      await manager.update(Order, order.id, {
+        deliveredAt,
+        status: OrderStatus.DELIVERED,
+      });
+
+      const history = manager.create(OrderStatusHistory, {
+        orderId: order.id,
+        fromStatus: OrderStatus.SHIPPED,
+        toStatus: OrderStatus.DELIVERED,
+        changedBy: staffId,
+        reason: dto.note ?? 'Delivered',
+      });
+      await manager.save(OrderStatusHistory, history);
+
+      const updated = await manager.findOneOrFail(Order, {
+        where: { id: order.id },
+        relations: ['items', 'statusHistory', 'user'],
+        order: { statusHistory: { createdAt: 'ASC' } },
+      });
+
+      this.sendDeliveredEmail(updated).catch((err) =>
+        this.logger.error(
+          `Delivered email failed for ${updated.orderNumber}: ${err.message}`,
+        ),
+      );
+
+      return updated;
+    });
+  }
+
+  /**
+   * Shipping email variant that includes tracking + carrier from the
+   * persisted order row. Falls back to the existing sendShippingEmail
+   * (orderNumber only) if either field is somehow missing.
+   */
+  private async sendShippingEmailWithTracking(order: Order): Promise<void> {
+    const email = await this.resolveOrderEmail(order);
+    if (!email) return;
+    await this.emailService.sendShippingNotification(
+      email,
+      order.orderNumber,
+      order.trackingNumber,
+      order.carrier,
+    );
+  }
+
+  private async sendDeliveredEmail(order: Order): Promise<void> {
+    const email = await this.resolveOrderEmail(order);
+    if (!email) return;
+    await this.emailService.sendOrderDelivered(email, order.orderNumber);
   }
 
   // ── Find All (paginated) ──
