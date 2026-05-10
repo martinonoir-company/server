@@ -71,8 +71,12 @@ export class InventoryController {
   /**
    * Record a stock movement (admin: restock, adjustment, etc.)
    * createdBy is automatically set from the authenticated user's JWT.
+   *
+   * Requires `inventory:adjust`. SUPER_ADMIN bypasses RBAC. Granted to
+   * COMPANY_SUPER_ADMIN and COMPANY_STAFF in PR #4's role migration.
    */
   @Post('movements')
+  @RequirePermissions(Permission.INVENTORY_ADJUST)
   async recordMovement(@Body() dto: RecordMovementDto, @Request() req: any) {
     const input: RecordMovementInput = {
       ...dto,
