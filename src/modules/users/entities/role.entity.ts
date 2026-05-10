@@ -121,6 +121,7 @@ export const SYSTEM_ROLES: Array<{ name: string; description: string; permission
       Permission.ORDERS_READ,
       Permission.ORDERS_UPDATE,
       Permission.INVENTORY_READ,
+      Permission.INVENTORY_ADJUST,
       Permission.CUSTOMERS_READ,
       Permission.POS_SELL,
       Permission.COUPONS_READ,
