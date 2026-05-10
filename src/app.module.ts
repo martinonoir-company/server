@@ -29,6 +29,7 @@ import { WishlistModule } from './modules/wishlist/wishlist.module';
 import { SharedModule } from './shared/shared.module';
 import { StaffModule } from './modules/staff/staff.module';
 import { CartModule } from './modules/cart/cart.module';
+import { BranchesModule } from './modules/branches/branches.module';
 
 @Module({
   imports: [
@@ -88,6 +89,7 @@ import { CartModule } from './modules/cart/cart.module';
     PosModule,
     WishlistModule,
     CartModule,
+    BranchesModule,
   ],
   controllers: [AppController],
   providers: [

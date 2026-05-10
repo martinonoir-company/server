@@ -71,6 +71,9 @@ export enum Permission {
   STAFF_CREATE = 'staff:create',
   STAFF_UPDATE = 'staff:update',
   STAFF_DELETE = 'staff:delete',
+
+  // Branches
+  BRANCHES_MANAGE = 'branches:manage',
 }
 
 /**
