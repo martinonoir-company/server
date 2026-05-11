@@ -30,6 +30,8 @@ import { SharedModule } from './shared/shared.module';
 import { StaffModule } from './modules/staff/staff.module';
 import { CartModule } from './modules/cart/cart.module';
 import { BranchesModule } from './modules/branches/branches.module';
+import { RealtimeModule } from './modules/realtime/realtime.module';
+import { PosSessionsModule } from './modules/pos-sessions/pos-sessions.module';
 
 @Module({
   imports: [
@@ -90,6 +92,8 @@ import { BranchesModule } from './modules/branches/branches.module';
     WishlistModule,
     CartModule,
     BranchesModule,
+    RealtimeModule,
+    PosSessionsModule,
   ],
   controllers: [AppController],
   providers: [

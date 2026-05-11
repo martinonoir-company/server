@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './shared/filters/global-exception.filter';
 import { CorrelationInterceptor } from './shared/interceptors/correlation.interceptor';
+import { RedisIoAdapter } from './modules/realtime/redis-io.adapter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -13,6 +14,13 @@ async function bootstrap() {
   });
 
   const config = app.get(ConfigService);
+
+  // ── WebSocket adapter ──
+  // Uses the Redis adapter when REDIS_URL is set (multi-node), else the
+  // default in-memory adapter. connectToRedis() is a no-op without the env.
+  const wsAdapter = new RedisIoAdapter(app);
+  await wsAdapter.connectToRedis();
+  app.useWebSocketAdapter(wsAdapter);
 
   // ── Global Prefix ──
   app.setGlobalPrefix('api');

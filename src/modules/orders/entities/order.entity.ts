@@ -81,6 +81,14 @@ export class Order extends BaseEntity {
   @Column({ type: 'enum', enum: OrderChannel, default: OrderChannel.STOREFRONT })
   channel!: OrderChannel;
 
+  /**
+   * Branch the order was sold at. NULL for storefront / admin orders.
+   * POS-channel orders created via the pos-sessions confirm flow set it.
+   */
+  @Index()
+  @Column({ type: 'varchar', length: 26, nullable: true })
+  branchId?: string | null;
+
   /** Currency for this order (NGN or USD) */
   @Column({ type: 'varchar', length: 3, default: 'NGN' })
   currency!: string;
