@@ -14,6 +14,7 @@ import { InventoryService } from '../inventory/inventory.service';
 import { MovementKind } from '../inventory/entities/inventory.entity';
 import { CartService } from '../cart/cart.service';
 import { EmailService } from '../notifications/email.service';
+import { PushService } from '../notifications/push.service';
 import { User } from '../users/entities/user.entity';
 import {
   CreateOrderDto,
@@ -38,6 +39,7 @@ export class OrdersService {
     private readonly inventoryService: InventoryService,
     private readonly cartService: CartService,
     private readonly emailService: EmailService,
+    private readonly pushService: PushService,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -425,6 +427,26 @@ export class OrdersService {
         ),
       );
 
+      // Fire customer push (storefront mobile app). Guest orders have
+      // no userId — sendToUser handles that as a no-op.
+      this.pushService
+        .sendToUser(updated.userId, {
+          title: 'Your order is on its way',
+          body: `Order ${updated.orderNumber} has shipped via ${updated.carrier ?? 'courier'}.`,
+          data: {
+            type: 'ORDER_SHIPPED',
+            orderId: updated.id,
+            orderNumber: updated.orderNumber,
+            trackingNumber: updated.trackingNumber,
+            carrier: updated.carrier,
+          },
+        })
+        .catch((err) =>
+          this.logger.error(
+            `Shipped push failed for ${updated.orderNumber}: ${err instanceof Error ? err.message : err}`,
+          ),
+        );
+
       return updated;
     });
   }
@@ -487,6 +509,22 @@ export class OrdersService {
           `Delivered email failed for ${updated.orderNumber}: ${err.message}`,
         ),
       );
+
+      this.pushService
+        .sendToUser(updated.userId, {
+          title: 'Your order has arrived',
+          body: `Order ${updated.orderNumber} has been delivered. Enjoy!`,
+          data: {
+            type: 'ORDER_DELIVERED',
+            orderId: updated.id,
+            orderNumber: updated.orderNumber,
+          },
+        })
+        .catch((err) =>
+          this.logger.error(
+            `Delivered push failed for ${updated.orderNumber}: ${err instanceof Error ? err.message : err}`,
+          ),
+        );
 
       return updated;
     });
