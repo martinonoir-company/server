@@ -33,12 +33,16 @@ export class CacheService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly config: ConfigService) {}
 
   onModuleInit() {
-    const host = this.config.get('REDIS_HOST', 'localhost');
+    const host = this.config.get<string>('REDIS_HOST', 'localhost');
     const port = this.config.get<number>('REDIS_PORT', 6379);
+    const username = this.config.get<string>('REDIS_USERNAME') || undefined;
+    const password = this.config.get<string>('REDIS_PASSWORD') || undefined;
 
     this.client = new Redis({
       host,
       port,
+      username,
+      password,
       maxRetriesPerRequest: 3,
       retryStrategy: (times) => Math.min(times * 200, 3000),
       lazyConnect: true,
