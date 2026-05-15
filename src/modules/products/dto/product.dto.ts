@@ -67,6 +67,10 @@ export class CreateVariantDto {
   trackInventory?: boolean;
 
   @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+
+  @IsOptional()
   options?: Record<string, string>;
 
   @IsOptional()
