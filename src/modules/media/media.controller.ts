@@ -11,7 +11,11 @@ import {
 } from '@nestjs/common';
 import { IsArray, IsString, ArrayMaxSize } from 'class-validator';
 import { MediaService } from './media.service';
-import { ConfirmUploadDto, PresignUploadDto } from './dto/media.dto';
+import {
+  ConfirmCategoryUploadDto,
+  ConfirmUploadDto,
+  PresignUploadDto,
+} from './dto/media.dto';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 
 class ReorderDto {
@@ -33,6 +37,7 @@ export class MediaController {
       contentType: dto.contentType,
       size: dto.size,
       productId: dto.productId,
+      categoryId: dto.categoryId,
     });
     return { data: result };
   }
@@ -46,6 +51,17 @@ export class MediaController {
       sortOrder: dto.sortOrder,
     });
     return { data: media };
+  }
+
+  /**
+   * Confirm a category image upload. Categories store a flat `imageUrl`
+   * string (no ProductMedia row), so this just resolves the uploaded key
+   * to its public URL — the caller then PUTs it onto the category.
+   */
+  @Post('confirm-category')
+  async confirmCategory(@Body() dto: ConfirmCategoryUploadDto) {
+    const url = this.media.resolvePublicUrl(dto.key);
+    return { data: { url } };
   }
 
   @Patch('product/:productId/reorder')

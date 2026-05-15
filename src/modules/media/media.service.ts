@@ -74,6 +74,7 @@ export class MediaService {
     contentType: AllowedMime;
     size: number;
     productId?: string;
+    categoryId?: string;
   }): Promise<PresignResult> {
     if (!this.bucket) {
       throw new InternalServerErrorException(
@@ -91,7 +92,10 @@ export class MediaService {
       );
     }
 
-    const key = this.buildObjectKey(input.filename, input.productId);
+    const key = this.buildObjectKey(input.filename, {
+      productId: input.productId,
+      categoryId: input.categoryId,
+    });
     const command = new PutObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -210,9 +214,21 @@ export class MediaService {
     });
   }
 
+  /**
+   * Resolve an uploaded S3 key to its public URL. Used by the category
+   * image flow, which has no ProductMedia row — the URL is stored as a
+   * flat string on the category itself.
+   */
+  resolvePublicUrl(key: string): string {
+    return this.publicUrlFor(key);
+  }
+
   // ── helpers ──
 
-  private buildObjectKey(filename: string, productId?: string): string {
+  private buildObjectKey(
+    filename: string,
+    scope: { productId?: string; categoryId?: string } = {},
+  ): string {
     const clean = filename
       .toLowerCase()
       .replace(/[^a-z0-9._-]/g, '-')
@@ -221,7 +237,14 @@ export class MediaService {
       .slice(-140);
     const stamp = Date.now().toString(36);
     const rand = Math.random().toString(36).slice(2, 8);
-    const prefix = productId ? `products/${productId}` : 'products/unassigned';
+    let prefix: string;
+    if (scope.categoryId) {
+      prefix = `categories/${scope.categoryId}`;
+    } else if (scope.productId) {
+      prefix = `products/${scope.productId}`;
+    } else {
+      prefix = 'products/unassigned';
+    }
     return `${prefix}/${stamp}-${rand}-${clean || 'upload'}`;
   }
 

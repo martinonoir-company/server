@@ -40,6 +40,28 @@ export class PresignUploadDto {
   @IsString()
   @MaxLength(26)
   productId?: string;
+
+  /**
+   * Optional category id. Scopes the S3 key under `categories/<id>/`.
+   * Mutually exclusive with productId in practice — the caller passes
+   * whichever entity the upload belongs to.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(26)
+  categoryId?: string;
+}
+
+/**
+ * Confirm a category image upload. Unlike product media there's no
+ * ProductMedia row — the category stores a flat `imageUrl` string — so
+ * this only resolves the uploaded key to its public URL. The caller then
+ * PUTs that URL onto the category via PUT /categories/:id.
+ */
+export class ConfirmCategoryUploadDto {
+  @IsString()
+  @MaxLength(500)
+  key!: string;
 }
 
 export class ConfirmUploadDto {
