@@ -67,11 +67,16 @@ async function bootstrap() {
   app.enableShutdownHooks();
 
   // ── Start ──
-  const port = config.get<number>('PORT', 3001);
-  await app.listen(port);
+  const port = config.get<number>('PORT', 3000);
+  // Bind to all interfaces (0.0.0.0) so the API is reachable from outside
+  // the host — required when a reverse proxy (nginx) or an external client
+  // connects via the machine's public IP. Without this, Node may bind only
+  // to the IPv6 loopback and refuse external connections.
+  const host = config.get<string>('HOST', '0.0.0.0');
+  await app.listen(port, host);
 
   const env = config.get('NODE_ENV', 'development');
-  console.log(`🚀 Martinonoir API running on http://localhost:${port}/api/v1 [${env}]`);
+  console.log(`🚀 Martinonoir API listening on ${host}:${port}/api/v1 [${env}]`);
   console.log(`   Security: Helmet ✓  CORS ✓  Rate-Limit ✓  Validation ✓  RawBody ✓`);
 }
 
