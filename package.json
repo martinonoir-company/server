@@ -23,7 +23,8 @@
     "migration:generate": "npm run typeorm -- migration:generate",
     "migration:run": "npm run typeorm -- migration:run",
     "migration:revert": "npm run typeorm -- migration:revert",
-    "migration:show": "npm run typeorm -- migration:show"
+    "migration:show": "npm run typeorm -- migration:show",
+    "seed:initial-users": "ts-node -r tsconfig-paths/register src/database/seeds/seed-initial-users.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1032.0",

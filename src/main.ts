@@ -38,9 +38,30 @@ async function bootstrap() {
   }));
 
   // ── CORS ──
-  const defaultOrigins = 'http://localhost:3000,http://localhost:3002,http://localhost:3003';
+  // Origins in the allowlist are CLIENT hosts (the page the browser
+  // loaded — NOT the API host). Mobile apps (Expo / React Native) don't
+  // send an Origin header and aren't subject to CORS; no entry needed.
+  // Requests with no Origin (e.g. curl, server-to-server, the mobile
+  // apps) are allowed through unconditionally.
+  const defaultOrigins = [
+    'http://localhost:3000',
+    'http://localhost:3002',
+    'http://localhost:3003',
+    'http://localhost:3004',
+  ].join(',');
+  const allowlist = config
+    .get<string>('CORS_ORIGINS', defaultOrigins)
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+
   app.enableCors({
-    origin: config.get('CORS_ORIGINS', defaultOrigins).split(',').map((o: string) => o.trim()),
+    origin: (origin, callback) => {
+      // No Origin → not a browser CORS request (curl, native mobile, etc).
+      if (!origin) return callback(null, true);
+      if (allowlist.includes(origin)) return callback(null, true);
+      return callback(new Error(`CORS: origin ${origin} not allowed`), false);
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id', 'Idempotency-Key'],
