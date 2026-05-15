@@ -21,9 +21,15 @@ export class CreateVariantDto {
   @MaxLength(200)
   name?: string;
 
+  /**
+   * Optional. When omitted, the server auto-generates a collision-free
+   * SKU in the format `MGN-<6 base32 chars>-<3-letter suffix>` (e.g.
+   * `MGN-K8R2VQ-BAG`). When supplied, validated for uniqueness.
+   */
+  @IsOptional()
   @IsString()
   @MaxLength(100)
-  sku!: string;
+  sku?: string;
 
   @IsNumber()
   @Min(0)
@@ -179,6 +185,66 @@ export class UpdateProductDto {
   @IsArray()
   @IsString({ each: true })
   tags?: string[];
+}
+
+// ── Add Variant To Existing Product ──
+//
+// Used by POST /products/:productId/variants. Differs from
+// CreateVariantDto only in that SKU is optional — if omitted, the server
+// auto-generates a collision-free SKU.
+
+export class AddVariantDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  name?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  sku?: string;
+
+  @IsNumber()
+  @Min(0)
+  retailPriceNgn!: number;
+
+  @IsNumber()
+  @Min(0)
+  retailPriceUsd!: number;
+
+  @IsOptional() @IsNumber() @Min(0) wholesalePriceNgn?: number;
+  @IsOptional() @IsNumber() @Min(0) wholesalePriceUsd?: number;
+  @IsOptional() @IsNumber() @Min(0) compareAtPriceNgn?: number;
+  @IsOptional() @IsNumber() @Min(0) compareAtPriceUsd?: number;
+  @IsOptional() @IsNumber() @Min(0) costPriceNgn?: number;
+  @IsOptional() @IsNumber() weightKg?: number;
+  @IsOptional() @IsBoolean() trackInventory?: boolean;
+  @IsOptional() @IsBoolean() isActive?: boolean;
+  @IsOptional() options?: Record<string, string>;
+  @IsOptional() @IsString() @MaxLength(100) barcode?: string;
+}
+
+// ── Update Existing Variant ──
+//
+// Used by PATCH /products/:productId/variants/:variantId. Every field is
+// optional; only the keys that appear in the payload are applied. SKU is
+// editable but rejected if it would collide with another variant.
+
+export class UpdateVariantDto {
+  @IsOptional() @IsString() @MaxLength(200) name?: string;
+  @IsOptional() @IsString() @MaxLength(100) sku?: string;
+  @IsOptional() @IsNumber() @Min(0) retailPriceNgn?: number;
+  @IsOptional() @IsNumber() @Min(0) retailPriceUsd?: number;
+  @IsOptional() @IsNumber() @Min(0) wholesalePriceNgn?: number;
+  @IsOptional() @IsNumber() @Min(0) wholesalePriceUsd?: number;
+  @IsOptional() @IsNumber() @Min(0) compareAtPriceNgn?: number;
+  @IsOptional() @IsNumber() @Min(0) compareAtPriceUsd?: number;
+  @IsOptional() @IsNumber() @Min(0) costPriceNgn?: number;
+  @IsOptional() @IsNumber() weightKg?: number;
+  @IsOptional() @IsBoolean() trackInventory?: boolean;
+  @IsOptional() @IsBoolean() isActive?: boolean;
+  @IsOptional() options?: Record<string, string>;
+  @IsOptional() @IsString() @MaxLength(100) barcode?: string;
 }
 
 // ── Query ──

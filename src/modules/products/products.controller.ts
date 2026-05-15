@@ -19,6 +19,8 @@ import {
   UpdateProductDto,
   ProductQueryDto,
   BulkUpdateProductsDto,
+  AddVariantDto,
+  UpdateVariantDto,
 } from './dto/product.dto';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { Public } from '../../shared/decorators/public.decorator';
@@ -115,5 +117,50 @@ export class ProductsController {
   async restore(@Param('id') id: string) {
     const product = await this.productsService.restore(id);
     return { data: product };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Admin: Variant CRUD (PRODUCTS_UPDATE)
+  //
+  // The product edit form leaves variants alone on save; explicit
+  // per-row operations live under these endpoints so add / edit /
+  // deactivate all have stable identity and explicit confirmations.
+  // ─────────────────────────────────────────────────────────────
+
+  @Post(':productId/variants')
+  @RequirePermissions(Permission.PRODUCTS_UPDATE)
+  async addVariant(
+    @Param('productId') productId: string,
+    @Body() dto: AddVariantDto,
+  ) {
+    const variant = await this.productsService.addVariantToProduct(productId, dto);
+    return { data: variant };
+  }
+
+  @Patch(':productId/variants/:variantId')
+  @RequirePermissions(Permission.PRODUCTS_UPDATE)
+  async updateVariant(
+    @Param('productId') productId: string,
+    @Param('variantId') variantId: string,
+    @Body() dto: UpdateVariantDto,
+  ) {
+    const variant = await this.productsService.updateVariant(productId, variantId, dto);
+    return { data: variant };
+  }
+
+  /**
+   * "Delete" a variant = deactivate it. The row stays for historical
+   * audit (orders, inventory, POS sessions reference it). Returns 409
+   * with a clear message if this is the product's last active variant.
+   */
+  @Delete(':productId/variants/:variantId')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(Permission.PRODUCTS_UPDATE)
+  async deactivateVariant(
+    @Param('productId') productId: string,
+    @Param('variantId') variantId: string,
+  ) {
+    const variant = await this.productsService.deactivateVariant(productId, variantId);
+    return { data: variant };
   }
 }

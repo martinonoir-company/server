@@ -1,15 +1,20 @@
 import {
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, Not } from 'typeorm';
+import { Repository, In, IsNull, Not } from 'typeorm';
+import { randomBytes } from 'crypto';
 import { Product, ProductVariant, ProductMedia } from './entities/product.entity';
+import { Category } from './entities/category.entity';
 import {
   CreateProductDto,
   UpdateProductDto,
   ProductQueryDto,
   BulkUpdateProductsDto,
+  AddVariantDto,
+  UpdateVariantDto,
 } from './dto/product.dto';
 import { CacheService } from '../../shared/services/cache.service';
 
@@ -46,6 +51,7 @@ export class ProductsService {
     @InjectRepository(Product) private readonly productRepo: Repository<Product>,
     @InjectRepository(ProductVariant) private readonly variantRepo: Repository<ProductVariant>,
     @InjectRepository(ProductMedia) private readonly mediaRepo: Repository<ProductMedia>,
+    @InjectRepository(Category) private readonly categoryRepo: Repository<Category>,
     private readonly cache: CacheService,
   ) {}
 
@@ -53,6 +59,41 @@ export class ProductsService {
 
   async create(dto: CreateProductDto): Promise<Product> {
     const slug = await this.generateUniqueSlug(dto.name);
+
+    // Resolve missing SKUs up-front. Any variant that arrives without a
+    // SKU gets a fresh auto-generated MGN-XXXXXX-SUF code. Supplied SKUs
+    // are normalised (trim + uppercase) and uniqueness-checked.
+    const variantSpecs = await Promise.all(
+      dto.variants.map(async (v) => {
+        let sku: string;
+        if (v.sku && v.sku.trim()) {
+          sku = v.sku.trim().toUpperCase();
+          const taken = await this.variantRepo.findOne({
+            where: { sku, deletedAt: IsNull() },
+            select: { id: true },
+          });
+          if (taken) {
+            throw new ConflictException(`SKU "${sku}" is already in use`);
+          }
+        } else {
+          sku = await this.generateUniqueSku({ categoryId: dto.categoryId });
+        }
+        return { ...v, sku };
+      }),
+    );
+
+    // Defensive: same SKU appearing twice in the same payload (e.g. a
+    // copy-paste in the admin form) would otherwise be caught by the DB
+    // unique constraint with a less helpful error.
+    const seenSkus = new Set<string>();
+    for (const v of variantSpecs) {
+      if (seenSkus.has(v.sku)) {
+        throw new ConflictException(
+          `SKU "${v.sku}" appears more than once in this product`,
+        );
+      }
+      seenSkus.add(v.sku);
+    }
 
     const product = this.productRepo.create({
       name: dto.name,
@@ -66,7 +107,7 @@ export class ProductsService {
       metaTitle: dto.metaTitle ?? dto.name,
       metaDescription: dto.metaDescription ?? dto.shortDescription,
       tags: dto.tags,
-      variants: dto.variants.map((v, i) =>
+      variants: variantSpecs.map((v, i) =>
         this.variantRepo.create({
           ...v,
           // Default wholesale to retail if not provided, and vice versa
@@ -539,4 +580,268 @@ export class ProductsService {
     while (taken.has(`${base}-${n}`)) n += 1;
     return `${base}-${n}`;
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // Variant CRUD (admin variant editor)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Add a new variant to an existing product.
+   *
+   * SKU handling:
+   *  - If the caller supplies a SKU, validate uniqueness (active rows).
+   *  - If absent, auto-generate one in the MGN-<6-base32>-<SUFFIX>
+   *    format. The suffix is derived from the product context (BAG by
+   *    default — extensible later). Includes a uniqueness check against
+   *    the DB so we never collide even on cosmic-ray odds.
+   */
+  async addVariantToProduct(
+    productId: string,
+    dto: AddVariantDto,
+  ): Promise<ProductVariant> {
+    const product = await this.findOne(productId);
+
+    let sku: string;
+    if (dto.sku && dto.sku.trim()) {
+      sku = dto.sku.trim().toUpperCase();
+      const taken = await this.variantRepo.findOne({
+        where: { sku, deletedAt: IsNull() },
+        select: { id: true },
+      });
+      if (taken) {
+        throw new ConflictException(`SKU "${sku}" is already in use`);
+      }
+    } else {
+      sku = await this.generateUniqueSku({
+        categoryName: product.category?.name,
+        categoryId: product.categoryId,
+      });
+    }
+
+    // Append at the end of the variants list by default.
+    const maxSort = await this.variantRepo
+      .createQueryBuilder('v')
+      .select('COALESCE(MAX(v."sortOrder"), -1)', 'max')
+      .where('v."productId" = :productId', { productId })
+      .getRawOne<{ max: string }>();
+    const sortOrder = Number(maxSort?.max ?? -1) + 1;
+
+    const variant = this.variantRepo.create({
+      productId,
+      sku,
+      name: dto.name,
+      retailPriceNgn: dto.retailPriceNgn,
+      retailPriceUsd: dto.retailPriceUsd,
+      wholesalePriceNgn: dto.wholesalePriceNgn ?? dto.retailPriceNgn,
+      wholesalePriceUsd: dto.wholesalePriceUsd ?? dto.retailPriceUsd,
+      compareAtPriceNgn: dto.compareAtPriceNgn,
+      compareAtPriceUsd: dto.compareAtPriceUsd,
+      costPriceNgn: dto.costPriceNgn,
+      weightKg: dto.weightKg,
+      trackInventory: dto.trackInventory ?? true,
+      isActive: dto.isActive ?? true,
+      options: dto.options,
+      barcode: dto.barcode?.trim() || undefined,
+      sortOrder,
+    });
+
+    const saved = await this.variantRepo.save(variant);
+    await this.cache.invalidateProducts();
+    return saved;
+  }
+
+  /**
+   * Update one variant. PATCH semantics: only keys present in the dto are
+   * applied. SKU changes are validated for uniqueness against other
+   * active variants.
+   */
+  async updateVariant(
+    productId: string,
+    variantId: string,
+    dto: UpdateVariantDto,
+  ): Promise<ProductVariant> {
+    const variant = await this.variantRepo.findOne({
+      where: { id: variantId, productId, deletedAt: IsNull() },
+    });
+    if (!variant) {
+      throw new NotFoundException('Variant not found on this product');
+    }
+
+    if (dto.sku !== undefined) {
+      const newSku = dto.sku.trim().toUpperCase();
+      if (newSku !== variant.sku) {
+        const taken = await this.variantRepo.findOne({
+          where: { sku: newSku, id: Not(variantId), deletedAt: IsNull() },
+          select: { id: true },
+        });
+        if (taken) {
+          throw new ConflictException(`SKU "${newSku}" is already in use`);
+        }
+        variant.sku = newSku;
+      }
+    }
+
+    // Apply remaining fields. Keep the explicit-field approach (rather
+    // than Object.assign) so we never silently accept an unknown prop.
+    if (dto.name !== undefined) variant.name = dto.name;
+    if (dto.retailPriceNgn !== undefined) variant.retailPriceNgn = dto.retailPriceNgn;
+    if (dto.retailPriceUsd !== undefined) variant.retailPriceUsd = dto.retailPriceUsd;
+    if (dto.wholesalePriceNgn !== undefined) variant.wholesalePriceNgn = dto.wholesalePriceNgn;
+    if (dto.wholesalePriceUsd !== undefined) variant.wholesalePriceUsd = dto.wholesalePriceUsd;
+    if (dto.compareAtPriceNgn !== undefined) variant.compareAtPriceNgn = dto.compareAtPriceNgn;
+    if (dto.compareAtPriceUsd !== undefined) variant.compareAtPriceUsd = dto.compareAtPriceUsd;
+    if (dto.costPriceNgn !== undefined) variant.costPriceNgn = dto.costPriceNgn;
+    if (dto.weightKg !== undefined) variant.weightKg = dto.weightKg;
+    if (dto.trackInventory !== undefined) variant.trackInventory = dto.trackInventory;
+    if (dto.isActive !== undefined) variant.isActive = dto.isActive;
+    if (dto.options !== undefined) variant.options = dto.options;
+    if (dto.barcode !== undefined) {
+      variant.barcode = dto.barcode.trim() || undefined;
+    }
+
+    const saved = await this.variantRepo.save(variant);
+    await this.cache.invalidateProducts();
+    return saved;
+  }
+
+  /**
+   * Deactivate a variant. Per the locked v1 decision (SCANNER_APP_PLAN
+   * §11-style), we don't soft-delete variants — they have FK references
+   * from orders, cart items, inventory movements, and POS sessions, and
+   * deactivation is the right "hide from new sales" semantic. The row
+   * stays visible in the admin (under an "Inactive" affordance) and can
+   * be reactivated with a flip of isActive.
+   *
+   * Refuses to deactivate the LAST active variant on a product — a
+   * product with no active variants is invisible everywhere and is more
+   * cleanly modelled by deactivating the product itself.
+   */
+  async deactivateVariant(
+    productId: string,
+    variantId: string,
+  ): Promise<ProductVariant> {
+    const variant = await this.variantRepo.findOne({
+      where: { id: variantId, productId, deletedAt: IsNull() },
+    });
+    if (!variant) {
+      throw new NotFoundException('Variant not found on this product');
+    }
+    if (!variant.isActive) {
+      return variant; // already inactive — idempotent no-op
+    }
+
+    const otherActive = await this.variantRepo.count({
+      where: {
+        productId,
+        id: Not(variantId),
+        isActive: true,
+        deletedAt: IsNull(),
+      },
+    });
+    if (otherActive === 0) {
+      throw new ConflictException({
+        error: 'LAST_ACTIVE_VARIANT',
+        message:
+          'Cannot deactivate the last active variant. Deactivate the product itself, or activate another variant first.',
+      });
+    }
+
+    variant.isActive = false;
+    const saved = await this.variantRepo.save(variant);
+    await this.cache.invalidateProducts();
+    return saved;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // SKU generation
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Auto-generate a unique SKU in the format MGN-<6 base32 chars>-<SUFFIX>.
+   *
+   *  - 32 alphabet, 6 chars → 32^6 ≈ 1.07 billion combinations.
+   *  - Each candidate is checked against the DB (including soft-deleted
+   *    rows) so we never collide. With retry-on-collision the worst case
+   *    is a handful of extra round-trips at 1B+ scale.
+   *  - The suffix is derived from the product's primary category (when
+   *    present) or defaults to BAG. Always 3 uppercase letters.
+   *
+   * Example output: MGN-K8R2VQ-BAG
+   *
+   * Reads existing variant SKUs WITH deleted ones included so a restored
+   * variant never duplicates a recycled SKU.
+   */
+  private async generateUniqueSku(opts: {
+    categoryId?: string | null;
+    categoryName?: string | null;
+  }): Promise<string> {
+    const suffix = await this.resolveSkuSuffix(opts);
+    // 50 attempts of a 1-in-a-billion collision is overkill but cheap.
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const middle = randomBase32(6);
+      const candidate = `MGN-${middle}-${suffix}`;
+      const taken = await this.variantRepo.findOne({
+        where: { sku: candidate },
+        withDeleted: true,
+        select: { id: true },
+      });
+      if (!taken) return candidate;
+    }
+    // Astronomically unlikely. If it ever happens, surface clearly.
+    throw new ConflictException(
+      'Failed to generate a unique SKU after 50 attempts',
+    );
+  }
+
+  /**
+   * Suffix derivation. Returns one of a few known abbreviations when
+   * the category name contains a recognised keyword (BAG, SHO, BLT,
+   * WLT); otherwise the first three letters of the cleaned name
+   * uppercased; falls back to BAG.
+   *
+   * Accepts the category name directly OR a categoryId to look up
+   * (used by the create-product path where the Product entity hasn't
+   * been persisted yet). Falls back to BAG when nothing's available.
+   */
+  private async resolveSkuSuffix(opts: {
+    categoryId?: string | null;
+    categoryName?: string | null;
+  }): Promise<string> {
+    let categoryName = opts.categoryName ?? '';
+    if (!categoryName && opts.categoryId) {
+      const cat = await this.categoryRepo.findOne({
+        where: { id: opts.categoryId },
+        select: { id: true, name: true },
+      });
+      categoryName = cat?.name ?? '';
+    }
+    const cleaned = categoryName
+      .toLowerCase()
+      .normalize('NFKD')
+      .replace(/[^a-z]/g, ''); // strip punctuation / spaces / digits
+    if (!cleaned) return 'BAG';
+    if (cleaned.includes('bag')) return 'BAG';
+    if (cleaned.includes('shoe')) return 'SHO';
+    if (cleaned.includes('belt')) return 'BLT';
+    if (cleaned.includes('wallet')) return 'WLT';
+    if (cleaned.length >= 3) return cleaned.slice(0, 3).toUpperCase();
+    return (cleaned.toUpperCase() + 'XXX').slice(0, 3);
+  }
+}
+
+/**
+ * Crockford base32 random string. Uses crypto-grade randomness from
+ * node:crypto. The Crockford alphabet (no I, L, O, U) is human-friendly:
+ * the output is safe to read aloud or type without ambiguity. Used by
+ * the SKU generator above.
+ */
+function randomBase32(length: number): string {
+  const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  const bytes = randomBytes(length);
+  let out = '';
+  for (let i = 0; i < length; i += 1) {
+    // Modulo bias is negligible at 8-bit → 32 (256 % 32 === 0, in fact).
+    out += ALPHABET[bytes[i]! % ALPHABET.length];
+  }
+  return out;
 }
