@@ -1,9 +1,16 @@
 import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { Order, OrderItem } from '../orders/entities/order.entity';
+import { Product, ProductVariant } from '../products/entities/product.entity';
+import { User } from '../users/entities/user.entity';
+import { StockLevel } from '../inventory/entities/inventory.entity';
+import { AnalyticsController } from './analytics.controller';
+import { AnalyticsService } from './analytics.service';
 
 @Module({
-  imports: [],
-  controllers: [],
-  providers: [],
-  exports: [],
+  imports: [TypeOrmModule.forFeature([Order, OrderItem, Product, ProductVariant, User, StockLevel])],
+  controllers: [AnalyticsController],
+  providers: [AnalyticsService],
+  exports: [AnalyticsService],
 })
 export class AnalyticsModule {}
