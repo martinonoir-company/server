@@ -300,6 +300,157 @@ export class PaymentsService {
     return { items, total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) };
   }
 
+  // ── Paystack orchestration (storefront + mobile) ──
+
+  /**
+   * Begin a Paystack payment for an order.
+   *
+   * Server-mediated: the client never calls Paystack. We create the
+   * PENDING payment row, ask Paystack to initialize a transaction using
+   * our merchantReference as the Paystack `reference`, and hand the
+   * client only the hosted-checkout URL.
+   *
+   * Idempotent per order: if an in-progress (PENDING/PROCESSING) Paystack
+   * payment already exists for the order, it is returned as-is rather
+   * than creating a second transaction.
+   */
+  async initiatePaystackPayment(input: {
+    order: Order;
+    channel: PaymentChannel;
+    customerEmail: string;
+    customerName: string;
+    callbackUrl: string;
+  }): Promise<Payment> {
+    const { order } = input;
+
+    // Reuse an existing open attempt for this order if there is one.
+    const open = await this.paymentRepo.findOne({
+      where: [
+        { orderId: order.id, provider: PaymentProvider.PAYSTACK, status: PaymentStatus.PENDING },
+        { orderId: order.id, provider: PaymentProvider.PAYSTACK, status: PaymentStatus.PROCESSING },
+      ],
+      order: { createdAt: 'DESC' },
+    });
+    if (open && open.checkoutUrl) return open;
+
+    const merchantReference = `MN-${order.orderNumber}-${Date.now()}`;
+    const amount = Number(order.grandTotal);
+
+    // Create the PENDING row first, so even if the provider call fails we
+    // have a record of the attempt.
+    const payment = await this.record({
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      provider: PaymentProvider.PAYSTACK,
+      channel: input.channel,
+      method: PaymentMethodType.CARD,
+      amount,
+      currency: order.currency,
+      merchantReference,
+      status: PaymentStatus.PENDING,
+    });
+
+    const intent = await this.paystack.createPayment({
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      amount,
+      currency: order.currency,
+      customerEmail: input.customerEmail,
+      customerName: input.customerName,
+      callbackUrl: input.callbackUrl,
+      // The provider uses this as the Paystack `reference`.
+      metadata: { merchantReference },
+    });
+
+    if (intent.status === PaymentIntentStatus.FAILED || !intent.checkoutUrl) {
+      await this.applyProviderState(payment.id, {
+        status: PaymentStatus.FAILED,
+        failureReason:
+          (intent.metadata?.['error'] as string) ?? 'Failed to initialize payment',
+        rawProviderData: intent.metadata ?? null,
+      });
+      throw new BadRequestException('Could not initialize payment. Please try again.');
+    }
+
+    // Persist the provider reference + checkout URL onto the row.
+    payment.providerReference = intent.providerReference;
+    payment.checkoutUrl = intent.checkoutUrl;
+    payment.status = PaymentStatus.PROCESSING;
+    return this.paymentRepo.save(payment);
+  }
+
+  /**
+   * Authoritatively reconcile a payment with the provider.
+   *
+   * This calls the provider's verify API (server-side, never the client)
+   * and applies the result through applyProviderState — the single path
+   * that can mark a payment SUCCEEDED/FAILED and flip the order to PAID.
+   * Safe to call repeatedly (webhook + client poll + manual): terminal
+   * states are immutable, so all callers converge on the same result.
+   */
+  async verifyAndReconcile(merchantReference: string): Promise<Payment> {
+    const payment = await this.findByMerchantReference(merchantReference);
+    if (!payment) {
+      throw new NotFoundException(`No payment for reference ${merchantReference}`);
+    }
+
+    // Already settled — nothing to do.
+    if (
+      payment.status === PaymentStatus.SUCCEEDED ||
+      payment.status === PaymentStatus.REFUNDED
+    ) {
+      return payment;
+    }
+
+    const providerName =
+      payment.provider === PaymentProvider.PAYSTACK
+        ? PaymentProviderName.PAYSTACK
+        : payment.provider === PaymentProvider.MONIEPOINT
+          ? PaymentProviderName.MONIEPOINT
+          : null;
+    if (!providerName) {
+      // CASH payments have no provider to verify against.
+      return payment;
+    }
+
+    const provider = this.providers.get(providerName);
+    if (!provider) return payment;
+
+    // Paystack verifies by the reference it was given (= merchantReference);
+    // Moniepoint by its own transaction reference.
+    const verifyRef =
+      payment.provider === PaymentProvider.PAYSTACK
+        ? payment.merchantReference
+        : (payment.providerReference ?? payment.merchantReference);
+
+    let intent: PaymentIntent;
+    try {
+      intent = await provider.verifyPayment({
+        providerReference: verifyRef,
+        provider: providerName,
+      });
+    } catch (err) {
+      this.logger.error(
+        `Verify failed for ${merchantReference}: ${(err as Error).message}`,
+      );
+      // Leave the row untouched — a transient verify error must not mark
+      // a payment failed. The next reconcile attempt will retry.
+      return payment;
+    }
+
+    const nextStatus = PaymentsService.mapIntentStatus(intent.status);
+    return this.applyProviderState(payment.id, {
+      status: nextStatus,
+      providerReference: intent.providerReference || payment.providerReference,
+      gatewayResponse: (intent.metadata?.['gatewayResponse'] as string) ?? null,
+      failureReason:
+        nextStatus === PaymentStatus.FAILED
+          ? ((intent.metadata?.['gatewayResponse'] as string) ?? 'Payment failed')
+          : null,
+      rawProviderData: intent.metadata ?? null,
+    });
+  }
+
   /** Map a provider PaymentIntentStatus onto our PaymentStatus. */
   static mapIntentStatus(s: PaymentIntentStatus): PaymentStatus {
     switch (s) {

@@ -38,7 +38,10 @@ export class PaystackProvider implements IPaymentProvider {
     this.logger.log(`Creating Paystack payment for order ${input.orderNumber}: ${input.amount} ${input.currency}`);
 
     if (!this.isLive) {
-      const reference = `PSK-${generateUlid()}`;
+      // Stub mode mirrors live: echo back the caller's reference so the
+      // verify-by-reference path works end-to-end without real keys.
+      const reference =
+        input.metadata?.['merchantReference'] ?? `PSK-${generateUlid()}`;
       return {
         providerReference: reference,
         amount: input.amount,
@@ -50,12 +53,17 @@ export class PaystackProvider implements IPaymentProvider {
       };
     }
 
-    // Live: Call Paystack Initialize Transaction
+    // Live: Call Paystack Initialize Transaction.
+    // The caller passes our own merchantReference — Paystack uses it as the
+    // transaction `reference`, so we can later verify by that same value.
+    const reference =
+      input.metadata?.['merchantReference'] ??
+      `MN-${input.orderNumber}-${Date.now()}`;
     const body = JSON.stringify({
       email: input.customerEmail,
       amount: input.amount, // Paystack expects amount in kobo
       currency: input.currency,
-      reference: `MN-${input.orderNumber}-${Date.now()}`,
+      reference,
       callback_url: input.callbackUrl,
       metadata: {
         orderId: input.orderId,
