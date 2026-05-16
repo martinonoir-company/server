@@ -214,7 +214,21 @@ export class ProductsService {
 
     const [items, total] = await qb.getManyAndCount();
 
-    const result = { items, total, page, limit, pages: Math.ceil(total / limit) };
+    // Public/storefront view: hide inactive variants so they can't be added
+    // to cart. The admin "show everything" view (withDeleted/deletedOnly)
+    // keeps them visible.
+    const isAdminView = !!(query.withDeleted || query.deletedOnly);
+    const visibleItems = isAdminView
+      ? items
+      : items.map((p) => this.withActiveVariantsOnly(p));
+
+    const result = {
+      items: visibleItems,
+      total,
+      page,
+      limit,
+      pages: Math.ceil(total / limit),
+    };
 
     // Cache the result
     await this.cache.set(cacheKey, result, ttl);
@@ -300,13 +314,34 @@ export class ProductsService {
 
     const rows = await hydrateQb.getMany();
     const byId = new Map(rows.map((r) => [r.id, r]));
+    const isAdminView = !!(query.withDeleted || query.deletedOnly);
     const items = rankedIds
       .map((id) => byId.get(id))
-      .filter((p): p is Product => !!p);
+      .filter((p): p is Product => !!p)
+      .map((p) => (isAdminView ? p : this.withActiveVariantsOnly(p)));
 
     const result = { items, total, page, limit, pages: Math.ceil(total / limit) };
     await this.cache.set(cacheKey, result, ttl);
     return result;
+  }
+
+  /**
+   * Strip inactive variants from a product before it leaves the API on a
+   * public/storefront path. An inactive variant must never appear as a
+   * buyable option: the storefront would render it, let the user click
+   * "Add to Cart", and the cart endpoint would then 404 with "Variant not
+   * found" (it filters on isActive) — silently emptying the cart.
+   *
+   * The admin product-detail path (findOne) deliberately does NOT call
+   * this, so the variant editor can still see and reactivate them.
+   */
+  private withActiveVariantsOnly<T extends { variants?: ProductVariant[] }>(
+    product: T,
+  ): T {
+    if (Array.isArray(product.variants)) {
+      product.variants = product.variants.filter((v) => v.isActive);
+    }
+    return product;
   }
 
   // ── Find One (by ID, cached) ──
@@ -345,6 +380,9 @@ export class ProductsService {
     if (!product) {
       throw new NotFoundException(`Product not found`);
     }
+
+    // Storefront-only path — never expose inactive variants as buyable.
+    this.withActiveVariantsOnly(product);
 
     await this.cache.set(cacheKey, product, CacheService.TTL.PRODUCT_DETAIL);
     return product;
