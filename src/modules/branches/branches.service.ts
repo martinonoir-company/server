@@ -215,6 +215,7 @@ export class BranchesService {
       name: dto.name,
       branchId,
       isActive: true,
+      moniepointTerminalSerial: dto.moniepointTerminalSerial?.trim() || null,
     });
 
     return this.terminalRepo.save(terminal);
@@ -235,6 +236,10 @@ export class BranchesService {
     if (!terminal) throw new NotFoundException('Terminal not found');
 
     if (dto.name !== undefined) terminal.name = dto.name;
+    if (dto.moniepointTerminalSerial !== undefined) {
+      terminal.moniepointTerminalSerial =
+        dto.moniepointTerminalSerial.trim() || null;
+    }
     if (dto.isActive !== undefined) {
       if (terminal.isActive && dto.isActive === false) {
         await this.assertNoActiveSessionForTerminal(terminal.id);

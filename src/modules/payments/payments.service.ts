@@ -451,6 +451,99 @@ export class PaymentsService {
     });
   }
 
+  // ── POS payments (cash + Moniepoint terminal) ──
+
+  /**
+   * Record a cash payment taken at the POS. A confirmed cash payment is
+   * money already in hand, so it is recorded directly as SUCCEEDED. Used
+   * for both single cash sales and the cash leg of a split payment.
+   */
+  async recordCashPayment(input: {
+    order: Order;
+    amount: number;
+    createdBy?: string | null;
+  }): Promise<Payment> {
+    const merchantReference = `CASH-${input.order.orderNumber}-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    const payment = await this.record({
+      orderId: input.order.id,
+      orderNumber: input.order.orderNumber,
+      provider: PaymentProvider.CASH,
+      channel: PaymentChannel.POS,
+      method: PaymentMethodType.CASH,
+      amount: input.amount,
+      currency: input.order.currency,
+      merchantReference,
+      status: PaymentStatus.SUCCEEDED,
+      createdBy: input.createdBy ?? null,
+      paidAt: new Date(),
+    });
+    // Recompute order paid-state (cash row is already SUCCEEDED).
+    await this.applyProviderState(payment.id, {
+      status: PaymentStatus.SUCCEEDED,
+      gatewayResponse: 'Cash collected at POS',
+    });
+    return this.findById(payment.id);
+  }
+
+  /**
+   * Push a card payment to a physical Moniepoint terminal.
+   *
+   * Creates a PROCESSING payment row and pushes the transaction to the
+   * device. The customer then taps/inserts their card on the terminal.
+   * Confirmation is NOT here — the caller polls verifyAndReconcile (or the
+   * Moniepoint webhook nudges it) until the row settles SUCCEEDED/FAILED.
+   */
+  async pushTerminalPayment(input: {
+    order: Order;
+    amount: number;
+    terminalSerial: string;
+    createdBy?: string | null;
+  }): Promise<Payment> {
+    const merchantReference = `POS-${input.order.orderNumber}-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+
+    const payment = await this.record({
+      orderId: input.order.id,
+      orderNumber: input.order.orderNumber,
+      provider: PaymentProvider.MONIEPOINT,
+      channel: PaymentChannel.POS,
+      method: PaymentMethodType.CARD,
+      amount: input.amount,
+      currency: input.order.currency,
+      merchantReference,
+      terminalSerial: input.terminalSerial,
+      status: PaymentStatus.PENDING,
+      createdBy: input.createdBy ?? null,
+    });
+
+    const pushResult = await this.moniepoint.pushToTerminal({
+      terminalSerial: input.terminalSerial,
+      amount: input.amount,
+      merchantReference,
+    });
+
+    if (pushResult.status === PaymentIntentStatus.FAILED) {
+      await this.applyProviderState(payment.id, {
+        status: PaymentStatus.FAILED,
+        failureReason: pushResult.message ?? 'Terminal push failed',
+        rawProviderData: pushResult.raw ?? null,
+      });
+      throw new BadRequestException(
+        pushResult.message ?? 'Could not start the card payment on the terminal.',
+      );
+    }
+
+    // Pushed successfully — the card transaction is now PROCESSING on the
+    // device. Store the provider reference; do NOT mark succeeded.
+    payment.providerReference = pushResult.transactionReference ?? null;
+    payment.status = PaymentStatus.PROCESSING;
+    payment.rawProviderData = pushResult.raw ?? null;
+    return this.paymentRepo.save(payment);
+  }
+
   /** Map a provider PaymentIntentStatus onto our PaymentStatus. */
   static mapIntentStatus(s: PaymentIntentStatus): PaymentStatus {
     switch (s) {

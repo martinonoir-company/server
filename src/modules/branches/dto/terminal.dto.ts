@@ -16,6 +16,9 @@ export class CreateTerminalDto {
   @IsString()
   @Length(1, 200)
   name!: string;
+
+  /** Serial of the paired physical Moniepoint card terminal. */
+  @IsOptional() @IsString() @Length(1, 64) moniepointTerminalSerial?: string;
 }
 
 /**
@@ -26,4 +29,7 @@ export class UpdateTerminalDto {
   @IsOptional() @IsString() @Length(1, 200) name?: string;
 
   @IsOptional() @IsBoolean() isActive?: boolean;
+
+  /** Serial of the paired physical Moniepoint card terminal. */
+  @IsOptional() @IsString() @Length(1, 64) moniepointTerminalSerial?: string;
 }

@@ -32,4 +32,12 @@ export class Terminal extends BaseEntity {
 
   @Column({ type: 'boolean', default: true })
   isActive!: boolean;
+
+  /**
+   * Serial of the physical Moniepoint card terminal paired with this POS
+   * terminal. Card payments at this POS are pushed to this device.
+   * Nullable — a POS terminal that only takes cash/transfer has none.
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  moniepointTerminalSerial?: string | null;
 }

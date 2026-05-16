@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import * as crypto from 'crypto';
 import {
   IPaymentProvider,
   PaymentProviderName,
@@ -14,157 +13,263 @@ import {
 import { generateUlid } from '../../../shared/entities/base.entity';
 
 /**
- * Moniepoint payment provider (NG primary).
- * Set MONIEPOINT_API_KEY and MONIEPOINT_SECRET_KEY in env.
- * Without them, operates in stub mode.
+ * Moniepoint POS Terminal provider.
+ *
+ * Integrates the Moniepoint POS API (https://api.pos.moniepoint.com,
+ * OpenAPI v3):
+ *   - POST /v1/transactions                       — push a card payment to
+ *                                                   a physical terminal
+ *   - GET  /v1/transactions/merchants/{ref}       — authoritative status
+ *
+ * Auth: a bearer API key (JWT) scoped `transaction:push` + `transaction:read`.
+ *
+ * Set MONIEPOINT_API_KEY to go live. Without it, runs in stub mode that
+ * mirrors the real shapes so the full flow is exercisable end-to-end.
  */
+
+/** Result of pushing a card transaction to a terminal. */
+export interface TerminalPushResult {
+  /** Echoes our merchantReference — the key to poll status with. */
+  merchantReference: string;
+  /** Moniepoint's own transaction reference, once assigned. */
+  transactionReference?: string;
+  /** Mapped lifecycle status. */
+  status: PaymentIntentStatus;
+  /** Provider message, if any. */
+  message?: string;
+  /** Raw provider response, kept for audit. */
+  raw?: Record<string, unknown>;
+}
+
+/** Result of a terminal transaction status lookup. */
+export interface TerminalStatusResult {
+  merchantReference: string;
+  transactionReference?: string;
+  status: PaymentIntentStatus;
+  /** Actual amount captured, minor units. */
+  actualAmount?: number;
+  responseCode?: string;
+  responseMessage?: string;
+  raw?: Record<string, unknown>;
+}
+
+/** Moniepoint processingStatus -> our PaymentIntentStatus. */
+function mapProcessingStatus(s: string | undefined): PaymentIntentStatus {
+  switch (s) {
+    case 'SUCCESSFUL':
+    case 'COMPLETED':
+      return PaymentIntentStatus.SUCCEEDED;
+    case 'FAILED':
+      return PaymentIntentStatus.FAILED;
+    case 'CANCELLED':
+      return PaymentIntentStatus.CANCELLED;
+    case 'PROCESSED':
+      return PaymentIntentStatus.PROCESSING;
+    case 'PENDING':
+    default:
+      return PaymentIntentStatus.PENDING;
+  }
+}
+
 @Injectable()
 export class MoniepointProvider implements IPaymentProvider {
   readonly name = PaymentProviderName.MONIEPOINT;
   private readonly logger = new Logger(MoniepointProvider.name);
   private readonly apiKey: string;
-  private readonly secretKey: string;
-  private readonly isLive: boolean;
   private readonly baseUrl: string;
+  private readonly isLive: boolean;
 
   constructor() {
     this.apiKey = process.env['MONIEPOINT_API_KEY'] ?? '';
-    this.secretKey = process.env['MONIEPOINT_SECRET_KEY'] ?? '';
-    this.isLive = !!(this.apiKey && this.secretKey);
-    this.baseUrl = process.env['MONIEPOINT_BASE_URL'] ?? 'https://api.moniepoint.com/api/v1';
+    this.baseUrl =
+      process.env['MONIEPOINT_BASE_URL'] ?? 'https://api.pos.moniepoint.com';
+    this.isLive = !!this.apiKey;
     if (!this.isLive) {
       this.logger.warn('MONIEPOINT_API_KEY not set — running in stub mode');
     }
   }
 
-  async createPayment(input: CreatePaymentInput): Promise<PaymentIntent> {
-    this.logger.log(`Creating Moniepoint payment for order ${input.orderNumber}: ${input.amount} ${input.currency}`);
+  // ── POS terminal API ──
+
+  /**
+   * Push a card payment to a physical Moniepoint terminal.
+   * The terminal then prompts the customer to tap/insert their card.
+   */
+  async pushToTerminal(input: {
+    terminalSerial: string;
+    amount: number; // minor units (kobo)
+    merchantReference: string;
+  }): Promise<TerminalPushResult> {
+    this.logger.log(
+      `Pushing ${input.amount} to terminal ${input.terminalSerial} (ref ${input.merchantReference})`,
+    );
 
     if (!this.isLive) {
-      const reference = `MNP-${generateUlid()}`;
+      // Stub: accept the push; the transaction sits PROCESSING until a
+      // stubbed lookup later reports it succeeded.
       return {
-        providerReference: reference,
-        amount: input.amount,
-        currency: input.currency,
-        provider: this.name,
-        status: PaymentIntentStatus.REQUIRES_ACTION,
-        checkoutUrl: `https://checkout.moniepoint.com/stub/${reference}`,
-        metadata: { orderId: input.orderId, orderNumber: input.orderNumber },
+        merchantReference: input.merchantReference,
+        transactionReference: `MNP-STUB-${generateUlid()}`,
+        status: PaymentIntentStatus.PROCESSING,
+        message: 'Stub: pushed to terminal',
       };
     }
 
-    // Live: Call Moniepoint payment initialization
-    const reference = `MN-${input.orderNumber}-${Date.now()}`;
-    const body = JSON.stringify({
-      amount: input.amount / 100, // Moniepoint expects Naira, not kobo
-      reference,
-      customerEmail: input.customerEmail,
-      customerName: input.customerName,
-      description: `Martinonoir Order ${input.orderNumber}`,
-      callbackUrl: input.callbackUrl,
-      metadata: {
-        orderId: input.orderId,
-        orderNumber: input.orderNumber,
-      },
-    });
-
     try {
-      const res = await fetch(`${this.baseUrl}/merchant/transactions/init-transaction`, {
+      const res = await fetch(`${this.baseUrl}/v1/transactions`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
         },
-        body,
+        body: JSON.stringify({
+          terminalSerial: input.terminalSerial,
+          amount: input.amount,
+          merchantReference: input.merchantReference,
+          transactionType: 'PURCHASE',
+          paymentMethod: 'CARD_PURCHASE',
+        }),
       });
 
-      const data = await res.json();
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
 
-      if (!data.responseBody?.checkoutUrl) {
-        this.logger.error(`Moniepoint init failed: ${JSON.stringify(data)}`);
+      if (!res.ok) {
+        this.logger.error(
+          `Moniepoint push failed (${res.status}): ${JSON.stringify(data)}`,
+        );
         return {
-          providerReference: reference,
-          amount: input.amount,
-          currency: input.currency,
-          provider: this.name,
+          merchantReference: input.merchantReference,
           status: PaymentIntentStatus.FAILED,
-          metadata: { error: data.responseMessage ?? 'Init failed' },
+          message:
+            (data['message'] as string) ??
+            `Terminal push failed (${res.status})`,
+          raw: data,
         };
       }
 
       return {
-        providerReference: data.responseBody.transactionReference ?? reference,
-        amount: input.amount,
-        currency: input.currency,
-        provider: this.name,
-        status: PaymentIntentStatus.REQUIRES_ACTION,
-        checkoutUrl: data.responseBody.checkoutUrl,
-        metadata: data.responseBody,
+        merchantReference:
+          (data['merchantReference'] as string) ?? input.merchantReference,
+        transactionReference: data['transactionReference'] as string,
+        // A freshly pushed transaction is PENDING/QUEUED on the device.
+        status: mapProcessingStatus(data['processingStatus'] as string),
+        message: data['responseMessage'] as string,
+        raw: data,
       };
     } catch (err) {
-      this.logger.error(`Moniepoint request failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
-      // Fallback — return stub response
+      this.logger.error(
+        `Moniepoint push error: ${(err as Error).message}`,
+      );
       return {
-        providerReference: reference,
-        amount: input.amount,
-        currency: input.currency,
-        provider: this.name,
+        merchantReference: input.merchantReference,
         status: PaymentIntentStatus.FAILED,
-        metadata: { error: 'Connection failed' },
+        message: 'Could not reach the card terminal service',
       };
     }
   }
 
-  async verifyPayment(input: VerifyPaymentInput): Promise<PaymentIntent> {
-    this.logger.log(`Verifying Moniepoint payment ${input.providerReference}`);
-
+  /**
+   * Authoritative status lookup for a pushed terminal transaction.
+   * This is the single source of truth for whether the card was charged.
+   */
+  async lookupTerminalTransaction(
+    merchantReference: string,
+  ): Promise<TerminalStatusResult> {
     if (!this.isLive) {
+      // Stub: report success so the full POS flow can be exercised.
       return {
-        providerReference: input.providerReference,
-        amount: 0,
-        currency: 'NGN',
-        provider: this.name,
+        merchantReference,
+        transactionReference: `MNP-STUB-${merchantReference}`,
         status: PaymentIntentStatus.SUCCEEDED,
+        responseCode: '00',
+        responseMessage: 'Stub: approved',
       };
     }
 
     try {
-      const res = await fetch(`${this.baseUrl}/merchant/transactions/${input.providerReference}`, {
-        headers: { 'Authorization': `Bearer ${this.apiKey}` },
-      });
+      const res = await fetch(
+        `${this.baseUrl}/v1/transactions/merchants/${encodeURIComponent(merchantReference)}`,
+        { headers: { Authorization: `Bearer ${this.apiKey}` } },
+      );
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
 
-      const data = await res.json();
-      const status = data.responseBody?.paymentStatus;
-      const statusMap: Record<string, PaymentIntentStatus> = {
-        PAID: PaymentIntentStatus.SUCCEEDED,
-        FAILED: PaymentIntentStatus.FAILED,
-        PENDING: PaymentIntentStatus.PENDING,
-        EXPIRED: PaymentIntentStatus.CANCELLED,
-      };
+      if (!res.ok) {
+        // 404 = not found yet (terminal still processing) — treat as pending.
+        return {
+          merchantReference,
+          status: PaymentIntentStatus.PENDING,
+          responseMessage:
+            (data['message'] as string) ?? `Lookup returned ${res.status}`,
+          raw: data,
+        };
+      }
 
       return {
-        providerReference: input.providerReference,
-        amount: (data.responseBody?.amount ?? 0) * 100,
-        currency: 'NGN',
-        provider: this.name,
-        status: statusMap[status] ?? PaymentIntentStatus.PENDING,
-        metadata: data.responseBody,
+        merchantReference:
+          (data['merchantReference'] as string) ?? merchantReference,
+        transactionReference: data['transactionReference'] as string,
+        status: mapProcessingStatus(data['processingStatus'] as string),
+        actualAmount:
+          typeof data['actualAmount'] === 'number'
+            ? (data['actualAmount'] as number)
+            : undefined,
+        responseCode: data['responseCode'] as string,
+        responseMessage: data['responseMessage'] as string,
+        raw: data,
       };
-    } catch {
-      return {
-        providerReference: input.providerReference,
-        amount: 0,
-        currency: 'NGN',
-        provider: this.name,
-        status: PaymentIntentStatus.PENDING,
-      };
+    } catch (err) {
+      this.logger.error(
+        `Moniepoint lookup error: ${(err as Error).message}`,
+      );
+      // Transient error — pending, so the caller retries rather than failing.
+      return { merchantReference, status: PaymentIntentStatus.PENDING };
     }
   }
 
-  async refund(input: RefundInput): Promise<RefundResult> {
-    this.logger.log(`Processing Moniepoint refund for ${input.providerReference}: ${input.amount}`);
+  // ── IPaymentProvider contract ──
+  // Moniepoint here is terminal-only; the generic hosted-checkout shape
+  // doesn't apply. createPayment is unsupported; verifyPayment maps onto
+  // the terminal lookup so PaymentsService.verifyAndReconcile works.
 
-    // Moniepoint refunds are typically initiated manually
+  async createPayment(input: CreatePaymentInput): Promise<PaymentIntent> {
+    this.logger.warn(
+      'MoniepointProvider.createPayment is not supported — use pushToTerminal',
+    );
+    return {
+      providerReference: '',
+      amount: input.amount,
+      currency: input.currency,
+      provider: this.name,
+      status: PaymentIntentStatus.FAILED,
+      metadata: { error: 'Moniepoint is a POS-terminal provider' },
+    };
+  }
+
+  async verifyPayment(input: VerifyPaymentInput): Promise<PaymentIntent> {
+    const result = await this.lookupTerminalTransaction(
+      input.providerReference,
+    );
+    return {
+      providerReference:
+        result.transactionReference ?? input.providerReference,
+      amount: result.actualAmount ?? 0,
+      currency: 'NGN',
+      provider: this.name,
+      status: result.status,
+      metadata: {
+        gatewayResponse: result.responseMessage,
+        responseCode: result.responseCode,
+        ...(result.raw ?? {}),
+      },
+    };
+  }
+
+  async refund(input: RefundInput): Promise<RefundResult> {
+    // Moniepoint terminal reversals are handled out-of-band by the
+    // merchant; we record the intent only.
+    this.logger.log(
+      `Moniepoint refund recorded for ${input.providerReference} (manual reversal required)`,
+    );
     return {
       providerReference: input.providerReference,
       refundReference: `MNP-REF-${generateUlid()}`,
@@ -173,18 +278,13 @@ export class MoniepointProvider implements IPaymentProvider {
     };
   }
 
-  verifyWebhookSignature(payload: WebhookPayload): boolean {
-    if (!this.isLive || !this.secretKey) {
-      this.logger.log('[STUB] Moniepoint webhook signature verification bypassed');
-      return true;
-    }
-
-    // Moniepoint uses HMAC-SHA512 with the secret key
-    const hash = crypto
-      .createHmac('sha512', this.secretKey)
-      .update(payload.rawBody)
-      .digest('hex');
-
-    return hash === payload.signature;
+  /**
+   * Moniepoint does not publish a webhook payload schema or a documented
+   * signing scheme. Per the agreed strategy the webhook is only a "go
+   * reconcile" nudge — it never sets state — so this returns true and the
+   * authoritative confirmation is always the transaction lookup.
+   */
+  verifyWebhookSignature(_payload: WebhookPayload): boolean {
+    return true;
   }
 }

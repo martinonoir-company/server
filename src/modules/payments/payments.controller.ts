@@ -24,14 +24,15 @@ import {
   PaymentProvider,
 } from './entities/payment.entity';
 import { Order } from '../orders/entities/order.entity';
+import { Terminal } from '../branches/entities/terminal.entity';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { Public } from '../../shared/decorators/public.decorator';
 import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
 import { Permission } from '../users/entities/role.entity';
 import { CurrentUser } from '../../shared/decorators/current-user.decorator';
 import { User } from '../users/entities/user.entity';
-import { IsString, IsOptional, IsEnum } from 'class-validator';
-import { NotFoundException } from '@nestjs/common';
+import { IsString, IsOptional, IsEnum, IsInt, Min } from 'class-validator';
+import { NotFoundException, BadRequestException } from '@nestjs/common';
 
 // ── DTOs ──
 
@@ -50,6 +51,20 @@ export class InitiatePaymentDto {
   @IsOptional() @IsString() callbackUrl?: string;
 }
 
+/** Record a cash payment for a POS order (single or a split leg). */
+export class PosCashPaymentDto {
+  @IsString() orderId!: string;
+  @IsInt() @Min(1) amount!: number;
+}
+
+/** Push a card payment to a Moniepoint terminal for a POS order. */
+export class PosTerminalPaymentDto {
+  @IsString() orderId!: string;
+  @IsInt() @Min(1) amount!: number;
+  /** POS terminal code — the Moniepoint serial is resolved from it. */
+  @IsString() terminalCode!: string;
+}
+
 @Controller({ path: 'payments', version: '1' })
 @UseGuards(JwtAuthGuard)
 export class PaymentsController {
@@ -59,6 +74,8 @@ export class PaymentsController {
     private readonly paymentsService: PaymentsService,
     @InjectRepository(Order)
     private readonly orderRepo: Repository<Order>,
+    @InjectRepository(Terminal)
+    private readonly terminalRepo: Repository<Terminal>,
   ) {}
 
   // ── Admin: payment records ──
@@ -176,9 +193,81 @@ export class PaymentsController {
     };
   }
 
+  // ── POS payments (cash + Moniepoint terminal) ──
+
+  /**
+   * Record a cash payment for a POS order. A confirmed cash payment means
+   * the cashier has collected the money, so it is recorded SUCCEEDED
+   * immediately. Works for a full cash sale or the cash leg of a split.
+   */
+  @Post('pos/cash')
+  @RequirePermissions(Permission.POS_SELL)
+  async posCash(@Body() dto: PosCashPaymentDto, @CurrentUser() user: User) {
+    const order = await this.orderRepo.findOne({ where: { id: dto.orderId } });
+    if (!order) throw new NotFoundException(`Order ${dto.orderId} not found`);
+
+    const payment = await this.paymentsService.recordCashPayment({
+      order,
+      amount: dto.amount,
+      createdBy: user.id,
+    });
+    return {
+      data: {
+        paymentId: payment.id,
+        merchantReference: payment.merchantReference,
+        status: payment.status,
+        amount: Number(payment.amount),
+      },
+    };
+  }
+
+  /**
+   * Push a card payment to a Moniepoint terminal for a POS order.
+   *
+   * Returns once the transaction has been pushed to the device — status
+   * is PROCESSING. The POS then polls POST /payments/reconcile/:ref until
+   * the customer's card is confirmed (SUCCEEDED) or the attempt FAILED.
+   */
+  @Post('pos/terminal')
+  @RequirePermissions(Permission.POS_SELL)
+  async posTerminal(
+    @Body() dto: PosTerminalPaymentDto,
+    @CurrentUser() user: User,
+  ) {
+    const order = await this.orderRepo.findOne({ where: { id: dto.orderId } });
+    if (!order) throw new NotFoundException(`Order ${dto.orderId} not found`);
+
+    const terminal = await this.terminalRepo.findOne({
+      where: { code: dto.terminalCode },
+    });
+    if (!terminal) {
+      throw new NotFoundException(`Terminal ${dto.terminalCode} not found`);
+    }
+    if (!terminal.moniepointTerminalSerial) {
+      throw new BadRequestException(
+        `Terminal ${dto.terminalCode} has no Moniepoint card device configured.`,
+      );
+    }
+
+    const payment = await this.paymentsService.pushTerminalPayment({
+      order,
+      amount: dto.amount,
+      terminalSerial: terminal.moniepointTerminalSerial,
+      createdBy: user.id,
+    });
+    return {
+      data: {
+        paymentId: payment.id,
+        merchantReference: payment.merchantReference,
+        status: payment.status,
+        amount: Number(payment.amount),
+      },
+    };
+  }
+
   // ── Webhook Endpoints ──
-  // Public (no JWT) — verified by provider-specific signatures. Phases 2/3
-  // attach reconciliation; for now they validate, log, and ack 200 fast.
+  // Public (no JWT). Webhooks are treated as a "go reconcile" nudge — the
+  // authoritative confirmation is always a server-side verify/lookup.
 
   /**
    * Paystack webhook.
@@ -245,17 +334,56 @@ export class PaymentsController {
     return { received: true };
   }
 
+  /**
+   * Moniepoint webhook.
+   *
+   * Moniepoint does not publish a webhook payload schema or signing
+   * scheme. Strategy: accept it, store the raw body for audit, ack 200
+   * fast, and treat it purely as a "go reconcile now" nudge. The
+   * authoritative confirmation is always the transaction-lookup API,
+   * called via verifyAndReconcile. The webhook body never sets state.
+   */
   @Public()
   @Post('webhooks/moniepoint')
   @HttpCode(HttpStatus.OK)
   async moniepointWebhook(@Req() req: RawBodyRequest<Request>) {
-    // Moniepoint does not publish a webhook payload schema. Strategy:
-    // accept, store raw, ack 200 fast, then reconcile asynchronously via
-    // the authoritative transaction-lookup API (wired in phase 3).
     const rawBody = req.rawBody;
-    this.logger.log(
-      `Moniepoint webhook received (${rawBody?.length ?? 0} bytes) — reconciliation wired in phase 3`,
-    );
+    if (!rawBody) return { received: true };
+
+    try {
+      const body = JSON.parse(rawBody.toString()) as Record<string, unknown>;
+      // The schema is undocumented — probe the likely places the merchant
+      // reference appears. Whatever we find, the lookup API confirms it.
+      const data = (body['data'] ?? body) as Record<string, unknown>;
+      const reference =
+        (data['merchantReference'] as string) ??
+        (body['merchantReference'] as string) ??
+        (data['merchant_reference'] as string) ??
+        null;
+
+      if (reference) {
+        const payment =
+          await this.paymentsService.findByMerchantReference(reference);
+        if (payment) {
+          await this.paymentsService.attachWebhook(payment.id, body);
+          // Authoritative confirmation via the lookup API.
+          await this.paymentsService.verifyAndReconcile(reference);
+        } else {
+          this.logger.warn(
+            `Moniepoint webhook for unknown reference ${reference}`,
+          );
+        }
+      } else {
+        this.logger.warn(
+          'Moniepoint webhook had no recognisable merchant reference',
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `Moniepoint webhook reconciliation error: ${(err as Error).message}`,
+      );
+    }
+    // Always ack 200 fast so Moniepoint does not retry-storm us.
     return { received: true };
   }
 
