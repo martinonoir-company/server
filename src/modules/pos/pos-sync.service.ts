@@ -193,13 +193,23 @@ export class PosSyncService {
       .map((p) => `${p.method}: ${currency} ${p.amount.toLocaleString()}`)
       .join(' + ');
 
-    // 6. Create the order (already PAID for POS)
+    // A POS_TERMINAL (card) leg is confirmed by the physical Moniepoint
+    // device, NOT here. When the tender contains a card leg the order is
+    // created PENDING_PAYMENT and the card leg's payment row is owned by
+    // the /payments/pos/terminal flow — that flow flips the order to PAID
+    // once the device confirms. A cash-only sale is PAID immediately.
+    const hasCardLeg = tx.payments.some((p) => p.method === 'POS_TERMINAL');
+    const initialStatus = hasCardLeg
+      ? OrderStatus.PENDING_PAYMENT
+      : OrderStatus.PAID;
+
+    // 6. Create the order
     const orderNumber = this.generateOrderNumber();
 
     const saved = await this.dataSource.transaction(async (manager) => {
       const order = manager.create(Order, {
         orderNumber,
-        status: OrderStatus.PAID,
+        status: initialStatus,
         channel: OrderChannel.POS,
         currency,
         subtotal,
@@ -208,7 +218,7 @@ export class PosSyncService {
         taxTotal: 0,
         grandTotal,
         paymentMethod,
-        paidAt: new Date(tx.timestamp),
+        paidAt: hasCardLeg ? undefined : new Date(tx.timestamp),
         idempotencyKey: `pos-${tx.transactionId}`,
         couponCode: tx.couponCode,
         discountType: tx.discountType || (tx.couponCode ? 'COUPON' : tx.discountAmount ? 'MANUAL' : undefined),
@@ -223,9 +233,11 @@ export class PosSyncService {
         statusHistory: [
           manager.create(OrderStatusHistory, {
             fromStatus: OrderStatus.DRAFT,
-            toStatus: OrderStatus.PAID,
+            toStatus: initialStatus,
             changedBy: tx.staffId,
-            reason: 'POS sale — immediate payment',
+            reason: hasCardLeg
+              ? 'POS sale — awaiting card payment on terminal'
+              : 'POS sale — immediate payment',
           }),
         ],
       });
@@ -233,14 +245,17 @@ export class PosSyncService {
       return manager.save(Order, order);
     });
 
-    // 7. Record a payment row per split into the payments ledger.
-    //    For a POS sale the cashier has collected every payment before
-    //    confirming, so each leg is recorded SUCCEEDED. POS split amounts
-    //    are already MINOR units (kobo) — consistent with the order rows
-    //    and the rest of the system. Ledger writes are best-effort — the
-    //    order is the source of truth and must not be lost if a
-    //    payment-row write hiccups.
+    // 7. Record a payment row per NON-CARD split into the payments ledger.
+    //    Cash / bank-transfer legs are money already collected by the
+    //    cashier, so they are recorded SUCCEEDED. A POS_TERMINAL (card)
+    //    leg is intentionally skipped here — its payment row is created
+    //    and confirmed by the /payments/pos/terminal flow once the
+    //    physical Moniepoint device approves the card.
+    //    POS split amounts are MINOR units (kobo), consistent with the
+    //    order rows. Ledger writes are best-effort — the order is the
+    //    source of truth and must survive a payment-row hiccup.
     for (const split of tx.payments) {
+      if (split.method === 'POS_TERMINAL') continue;
       const mapping =
         SPLIT_TO_PAYMENT[split.method] ?? SPLIT_TO_PAYMENT['CASH']!;
       try {
