@@ -235,10 +235,11 @@ export class PosSyncService {
 
     // 7. Record a payment row per split into the payments ledger.
     //    For a POS sale the cashier has collected every payment before
-    //    confirming, so each leg is recorded SUCCEEDED. Amounts on the
-    //    POS split are MAJOR units; the ledger stores minor units.
-    //    Ledger writes are best-effort — the order is the source of truth
-    //    and must not be lost if a payment-row write hiccups.
+    //    confirming, so each leg is recorded SUCCEEDED. POS split amounts
+    //    are already MINOR units (kobo) — consistent with the order rows
+    //    and the rest of the system. Ledger writes are best-effort — the
+    //    order is the source of truth and must not be lost if a
+    //    payment-row write hiccups.
     for (const split of tx.payments) {
       const mapping =
         SPLIT_TO_PAYMENT[split.method] ?? SPLIT_TO_PAYMENT['CASH']!;
@@ -249,7 +250,7 @@ export class PosSyncService {
           provider: mapping.provider,
           channel: PaymentChannel.POS,
           method: mapping.method,
-          amount: Math.round(split.amount * 100),
+          amount: Math.round(split.amount),
           currency,
           merchantReference: `POS-${tx.transactionId}-${split.method}`,
           status: PaymentStatus.SUCCEEDED,

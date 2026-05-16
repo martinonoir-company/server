@@ -552,16 +552,22 @@ export class PosSessionsService {
     }
   }
 
-  /** Recompute subtotal / discount / grand total from line items + discount. */
+  /**
+   * Recompute subtotal / discount / grand total from line items + discount.
+   *
+   * All amounts are MINOR units (kobo): `unitPrice` comes from the
+   * variant's bigint kobo price and `discountAmount` is also kobo —
+   * consistent with the order rows, the payments ledger, and the POS app.
+   */
   private recomputeTotals(cart: PosSessionCart): void {
     const subtotal = cart.items.reduce(
       (sum, l) => sum + l.unitPrice * l.quantity,
       0,
     );
-    // discountAmount is in MAJOR units (matching the POS sync DTO); convert
-    // to minor units for the totals snapshot.
-    const discountMinor = Math.round((cart.discountAmount ?? 0) * 100);
-    const discountTotal = Math.min(discountMinor, subtotal);
+    const discountTotal = Math.min(
+      Math.round(cart.discountAmount ?? 0),
+      subtotal,
+    );
     cart.totals = {
       subtotal,
       discountTotal,
