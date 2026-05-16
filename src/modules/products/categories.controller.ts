@@ -7,6 +7,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { CategoriesService } from './categories.service';
@@ -41,6 +42,23 @@ export class CategoriesController {
   async findTree() {
     const tree = await this.categoriesService.findTree();
     return { data: tree };
+  }
+
+  /**
+   * Paginated active categories for the storefront "all categories" page.
+   * Defaults: page 1, 12 per page (limit capped at 48 server-side).
+   */
+  @Get('paginated')
+  @Public()
+  async findPaginated(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const result = await this.categoriesService.findPaginated(
+      page ? parseInt(page, 10) || 1 : 1,
+      limit ? parseInt(limit, 10) || 12 : 12,
+    );
+    return { data: result };
   }
 
   @Get('slug/:slug')

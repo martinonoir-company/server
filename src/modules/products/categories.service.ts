@@ -75,6 +75,50 @@ export class CategoriesService {
     return categories;
   }
 
+  /**
+   * Paginated list of active categories for the storefront "all categories"
+   * page. Cached per-page (30 min) so repeated browsing is cheap.
+   */
+  async findPaginated(
+    page = 1,
+    limit = 12,
+  ): Promise<{
+    items: Category[];
+    total: number;
+    page: number;
+    limit: number;
+    pages: number;
+  }> {
+    const safePage = Math.max(1, Math.floor(page));
+    const safeLimit = Math.min(48, Math.max(1, Math.floor(limit)));
+    const cacheKey = `categories:paginated:p${safePage}:l${safeLimit}`;
+    const cached = await this.cache.get<{
+      items: Category[];
+      total: number;
+      page: number;
+      limit: number;
+      pages: number;
+    }>(cacheKey);
+    if (cached) return cached;
+
+    const [items, total] = await this.categoryRepo.findAndCount({
+      where: { isActive: true },
+      order: { sortOrder: 'ASC', name: 'ASC' },
+      skip: (safePage - 1) * safeLimit,
+      take: safeLimit,
+    });
+
+    const result = {
+      items,
+      total,
+      page: safePage,
+      limit: safeLimit,
+      pages: Math.max(1, Math.ceil(total / safeLimit)),
+    };
+    await this.cache.set(cacheKey, result, CacheService.TTL.CATEGORY_LIST);
+    return result;
+  }
+
   /** Hierarchical tree (cached 30 min) */
   async findTree(): Promise<Category[]> {
     const cacheKey = CacheService.categoryTreeKey();
