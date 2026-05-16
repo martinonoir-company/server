@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { CouponsService, ApplyCouponResult } from '../coupons/coupons.service';
+import { CouponChannel } from '../coupons/entities/coupon.entity';
 import { ShippingService, ShippingRate } from '../shipping/shipping.service';
 
 /**
@@ -26,6 +27,8 @@ export interface QuoteContext {
   userId?: string;
   couponCode?: string;
   shippingMethod?: string;
+  /** Sales channel — gates channel-scoped coupons. */
+  channel?: CouponChannel;
 }
 
 /**
@@ -134,6 +137,7 @@ export class PricingEngine {
           subtotal,
           currency,
           context.userId,
+          context.channel,
         );
         if (couponResult.valid) {
           discountTotal = couponResult.discountAmount;

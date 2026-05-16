@@ -25,8 +25,9 @@ import { Public } from '../../shared/decorators/public.decorator';
 import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
 import { Permission } from '../users/entities/role.entity';
 import { User } from '../users/entities/user.entity';
-import { IsArray, IsObject, IsString, IsNumber, IsOptional, ValidateNested } from 'class-validator';
+import { IsArray, IsObject, IsString, IsNumber, IsOptional, IsEnum, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
+import { CouponChannel } from '../coupons/entities/coupon.entity';
 
 class QuoteContextDto {
   @IsString() currency!: string;
@@ -35,6 +36,8 @@ class QuoteContextDto {
   @IsOptional() @IsString() userId?: string;
   @IsOptional() @IsString() couponCode?: string;
   @IsOptional() @IsString() shippingMethod?: string;
+  /** Sales channel the quote originates from — gates channel-scoped coupons. */
+  @IsOptional() @IsEnum(CouponChannel) channel?: CouponChannel;
 }
 
 class QuoteItemDto {

@@ -13,6 +13,20 @@ export enum CouponStatus {
   DISABLED = 'DISABLED',
 }
 
+/** Sales channels a coupon can be applied on. */
+export enum CouponChannel {
+  STOREFRONT = 'STOREFRONT',
+  MOBILE = 'MOBILE',
+  POS = 'POS',
+}
+
+/** All channels — the default scope for a new coupon (applies everywhere). */
+export const ALL_COUPON_CHANNELS: CouponChannel[] = [
+  CouponChannel.STOREFRONT,
+  CouponChannel.MOBILE,
+  CouponChannel.POS,
+];
+
 @Entity('coupons')
 export class Coupon extends BaseEntity {
   @Index({ unique: true })
@@ -69,6 +83,14 @@ export class Coupon extends BaseEntity {
   /** Restrict to specific category IDs */
   @Column({ type: 'jsonb', default: [] })
   applicableCategoryIds!: string[];
+
+  /**
+   * Channels this coupon may be applied on. An empty array means "all
+   * channels" (treated the same as listing every channel). A coupon scoped
+   * to e.g. only POS will be rejected when applied from the storefront.
+   */
+  @Column({ type: 'jsonb', default: [] })
+  applicableChannels!: CouponChannel[];
 
   /** Created by (staff user ID) */
   @Column({ type: 'varchar', length: 26, nullable: true })
