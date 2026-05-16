@@ -11,6 +11,29 @@ import {
   PosSyncBatchResult,
 } from './dto/pos-sync.dto';
 import { PosSyncJob, SyncJobStatus } from './entities/pos-sync-job.entity';
+import { PaymentsService } from '../payments/payments.service';
+import {
+  PaymentProvider,
+  PaymentChannel,
+  PaymentMethodType,
+  PaymentStatus,
+} from '../payments/entities/payment.entity';
+
+/** Map a POS payment-split method onto the payments-ledger taxonomy. */
+const SPLIT_TO_PAYMENT: Record<
+  string,
+  { provider: PaymentProvider; method: PaymentMethodType }
+> = {
+  CASH: { provider: PaymentProvider.CASH, method: PaymentMethodType.CASH },
+  POS_TERMINAL: {
+    provider: PaymentProvider.MONIEPOINT,
+    method: PaymentMethodType.CARD,
+  },
+  BANK_TRANSFER: {
+    provider: PaymentProvider.CASH,
+    method: PaymentMethodType.BANK_TRANSFER,
+  },
+};
 
 /** Map POS payment method strings to the PaymentMethod enum */
 const PAYMENT_METHOD_MAP: Record<string, PaymentMethod> = {
@@ -31,6 +54,7 @@ export class PosSyncService {
     @InjectRepository(ProductVariant) private readonly variantRepo: Repository<ProductVariant>,
     @InjectRepository(Product) private readonly productRepo: Repository<Product>,
     @InjectRepository(PosSyncJob) private readonly syncJobRepo: Repository<PosSyncJob>,
+    private readonly paymentsService: PaymentsService,
   ) {}
 
   /**
@@ -172,7 +196,7 @@ export class PosSyncService {
     // 6. Create the order (already PAID for POS)
     const orderNumber = this.generateOrderNumber();
 
-    return this.dataSource.transaction(async (manager) => {
+    const saved = await this.dataSource.transaction(async (manager) => {
       const order = manager.create(Order, {
         orderNumber,
         status: OrderStatus.PAID,
@@ -206,14 +230,46 @@ export class PosSyncService {
         ],
       });
 
-      const saved = await manager.save(Order, order);
-
-      return {
-        status: 'SUCCESS' as const,
-        orderId: saved.id,
-        orderNumber: saved.orderNumber,
-      };
+      return manager.save(Order, order);
     });
+
+    // 7. Record a payment row per split into the payments ledger.
+    //    For a POS sale the cashier has collected every payment before
+    //    confirming, so each leg is recorded SUCCEEDED. Amounts on the
+    //    POS split are MAJOR units; the ledger stores minor units.
+    //    Ledger writes are best-effort — the order is the source of truth
+    //    and must not be lost if a payment-row write hiccups.
+    for (const split of tx.payments) {
+      const mapping =
+        SPLIT_TO_PAYMENT[split.method] ?? SPLIT_TO_PAYMENT['CASH']!;
+      try {
+        await this.paymentsService.record({
+          orderId: saved.id,
+          orderNumber: saved.orderNumber,
+          provider: mapping.provider,
+          channel: PaymentChannel.POS,
+          method: mapping.method,
+          amount: Math.round(split.amount * 100),
+          currency,
+          merchantReference: `POS-${tx.transactionId}-${split.method}`,
+          status: PaymentStatus.SUCCEEDED,
+          createdBy: tx.staffId,
+          paidAt: new Date(tx.timestamp),
+        });
+      } catch (err) {
+        this.logger.error(
+          `Failed to record ${split.method} payment for order ${saved.orderNumber}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      }
+    }
+
+    return {
+      status: 'SUCCESS' as const,
+      orderId: saved.id,
+      orderNumber: saved.orderNumber,
+    };
   }
 
   /**
