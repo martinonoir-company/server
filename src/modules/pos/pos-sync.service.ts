@@ -11,6 +11,7 @@ import {
   PosSyncBatchResult,
 } from './dto/pos-sync.dto';
 import { PosSyncJob, SyncJobStatus } from './entities/pos-sync-job.entity';
+import { withUniqueOrderNumber } from '../orders/order-number.util';
 import { PaymentsService } from '../payments/payments.service';
 import {
   PaymentProvider,
@@ -45,7 +46,6 @@ const PAYMENT_METHOD_MAP: Record<string, PaymentMethod> = {
 @Injectable()
 export class PosSyncService {
   private readonly logger = new Logger(PosSyncService.name);
-  private orderCounter = 0;
 
   constructor(
     private readonly inventoryService: InventoryService,
@@ -203,46 +203,47 @@ export class PosSyncService {
       ? OrderStatus.PENDING_PAYMENT
       : OrderStatus.PAID;
 
-    // 6. Create the order
-    const orderNumber = this.generateOrderNumber();
-
+    // 6. Create the order. The order number is computed from the database
+    //    inside the transaction; withUniqueOrderNumber retries with a
+    //    fresh number if a concurrent sale grabs the same sequence.
     const saved = await this.dataSource.transaction(async (manager) => {
-      const order = manager.create(Order, {
-        orderNumber,
-        status: initialStatus,
-        channel: OrderChannel.POS,
-        currency,
-        subtotal,
-        discountTotal,
-        shippingTotal: 0,
-        taxTotal: 0,
-        grandTotal,
-        paymentMethod,
-        paidAt: hasCardLeg ? undefined : new Date(tx.timestamp),
-        idempotencyKey: `pos-${tx.transactionId}`,
-        couponCode: tx.couponCode,
-        discountType: tx.discountType || (tx.couponCode ? 'COUPON' : tx.discountAmount ? 'MANUAL' : undefined),
-        discountAppliedBy: (tx.discountAmount || tx.couponCode) ? tx.staffId : undefined,
-        discountAppliedByName: (tx.discountAmount || tx.couponCode) ? tx.staffName : undefined,
-        discountAppliedAt: (tx.discountAmount || tx.couponCode) ? (tx.discountAppliedAt ? new Date(tx.discountAppliedAt) : new Date(tx.timestamp)) : undefined,
-        staffNote: `POS terminal: ${tx.terminalId} | Payment: ${paymentDetails}`,
-        customerNote: tx.customerName
-          ? `Customer: ${tx.customerName}${tx.customerPhone ? ` (${tx.customerPhone})` : ''}`
-          : undefined,
-        items: orderItems.map((item) => manager.create(OrderItem, item)),
-        statusHistory: [
-          manager.create(OrderStatusHistory, {
-            fromStatus: OrderStatus.DRAFT,
-            toStatus: initialStatus,
-            changedBy: tx.staffId,
-            reason: hasCardLeg
-              ? 'POS sale — awaiting card payment on terminal'
-              : 'POS sale — immediate payment',
-          }),
-        ],
+      return withUniqueOrderNumber(manager, 'POS', (orderNumber) => {
+        const order = manager.create(Order, {
+          orderNumber,
+          status: initialStatus,
+          channel: OrderChannel.POS,
+          currency,
+          subtotal,
+          discountTotal,
+          shippingTotal: 0,
+          taxTotal: 0,
+          grandTotal,
+          paymentMethod,
+          paidAt: hasCardLeg ? undefined : new Date(tx.timestamp),
+          idempotencyKey: `pos-${tx.transactionId}`,
+          couponCode: tx.couponCode,
+          discountType: tx.discountType || (tx.couponCode ? 'COUPON' : tx.discountAmount ? 'MANUAL' : undefined),
+          discountAppliedBy: (tx.discountAmount || tx.couponCode) ? tx.staffId : undefined,
+          discountAppliedByName: (tx.discountAmount || tx.couponCode) ? tx.staffName : undefined,
+          discountAppliedAt: (tx.discountAmount || tx.couponCode) ? (tx.discountAppliedAt ? new Date(tx.discountAppliedAt) : new Date(tx.timestamp)) : undefined,
+          staffNote: `POS terminal: ${tx.terminalId} | Payment: ${paymentDetails}`,
+          customerNote: tx.customerName
+            ? `Customer: ${tx.customerName}${tx.customerPhone ? ` (${tx.customerPhone})` : ''}`
+            : undefined,
+          items: orderItems.map((item) => manager.create(OrderItem, item)),
+          statusHistory: [
+            manager.create(OrderStatusHistory, {
+              fromStatus: OrderStatus.DRAFT,
+              toStatus: initialStatus,
+              changedBy: tx.staffId,
+              reason: hasCardLeg
+                ? 'POS sale — awaiting card payment on terminal'
+                : 'POS sale — immediate payment',
+            }),
+          ],
+        });
+        return manager.save(Order, order);
       });
-
-      return manager.save(Order, order);
     });
 
     // 7. Record a payment row per NON-CARD split into the payments ledger.
@@ -342,15 +343,5 @@ export class PosSyncService {
       status: SyncJobStatus.COMPLETED,
       orderId,
     });
-  }
-
-  private generateOrderNumber(): string {
-    const now = new Date();
-    const y = now.getFullYear().toString().slice(-2);
-    const m = (now.getMonth() + 1).toString().padStart(2, '0');
-    const d = now.getDate().toString().padStart(2, '0');
-    this.orderCounter++;
-    const seq = this.orderCounter.toString().padStart(5, '0');
-    return `POS-${y}${m}${d}-${seq}`;
   }
 }

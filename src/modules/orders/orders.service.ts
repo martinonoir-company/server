@@ -23,11 +23,11 @@ import {
   DispatchOrderDto,
   MarkDeliveredDto,
 } from './dto/order.dto';
+import { withUniqueOrderNumber } from './order-number.util';
 
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
-  private orderCounter = 0;
 
   constructor(
     @InjectRepository(Order) private readonly orderRepo: Repository<Order>,
@@ -127,40 +127,42 @@ export class OrdersService {
         });
       }
 
-      // 3. Create order
-      const orderNumber = this.generateOrderNumber();
+      // 3. Create order. The order number is computed from the database
+      //    inside this transaction; withUniqueOrderNumber retries with a
+      //    fresh number if a concurrent checkout grabs the same sequence.
       const isPOS = channel === OrderChannel.POS;
       const initialStatus = isPOS ? OrderStatus.PAID : OrderStatus.PENDING_PAYMENT;
-      const order = manager.create(Order, {
-        orderNumber,
-        userId,
-        guestEmail: dto.guestEmail,
-        status: initialStatus,
-        channel,
-        currency,
-        subtotal,
-        discountTotal: 0,
-        shippingTotal: 0,
-        taxTotal: 0,
-        grandTotal: subtotal,
-        paymentMethod: dto.paymentMethod,
-        paidAt: isPOS ? new Date() : undefined,
-        shippingAddress: dto.shippingAddress,
-        couponCode: dto.couponCode,
-        customerNote: dto.customerNote,
-        idempotencyKey: dto.idempotencyKey,
-        items: orderItems.map((item) => manager.create(OrderItem, item)),
-        statusHistory: [
-          manager.create(OrderStatusHistory, {
-            fromStatus: OrderStatus.DRAFT,
-            toStatus: initialStatus,
-            changedBy: userId,
-            reason: isPOS ? 'POS sale — immediate payment' : 'Checkout initiated',
-          }),
-        ],
+      return withUniqueOrderNumber(manager, 'MN', (orderNumber) => {
+        const order = manager.create(Order, {
+          orderNumber,
+          userId,
+          guestEmail: dto.guestEmail,
+          status: initialStatus,
+          channel,
+          currency,
+          subtotal,
+          discountTotal: 0,
+          shippingTotal: 0,
+          taxTotal: 0,
+          grandTotal: subtotal,
+          paymentMethod: dto.paymentMethod,
+          paidAt: isPOS ? new Date() : undefined,
+          shippingAddress: dto.shippingAddress,
+          couponCode: dto.couponCode,
+          customerNote: dto.customerNote,
+          idempotencyKey: dto.idempotencyKey,
+          items: orderItems.map((item) => manager.create(OrderItem, item)),
+          statusHistory: [
+            manager.create(OrderStatusHistory, {
+              fromStatus: OrderStatus.DRAFT,
+              toStatus: initialStatus,
+              changedBy: userId,
+              reason: isPOS ? 'POS sale — immediate payment' : 'Checkout initiated',
+            }),
+          ],
+        });
+        return manager.save(Order, order);
       });
-
-      return manager.save(Order, order);
     });
 
     // Clear the user's server-persisted cart once the order row is committed.
@@ -623,18 +625,6 @@ export class OrdersService {
     });
     if (!order) throw new NotFoundException(`Order #${orderNumber} not found`);
     return order;
-  }
-
-  // ── Generate Order Number ──
-
-  private generateOrderNumber(): string {
-    const now = new Date();
-    const y = now.getFullYear().toString().slice(-2);
-    const m = (now.getMonth() + 1).toString().padStart(2, '0');
-    const d = now.getDate().toString().padStart(2, '0');
-    this.orderCounter++;
-    const seq = this.orderCounter.toString().padStart(5, '0');
-    return `MN-${y}${m}${d}-${seq}`;
   }
 
   // ── Email Helpers ──
