@@ -17,6 +17,7 @@ import {
   UpdateVariantDto,
 } from './dto/product.dto';
 import { CacheService } from '../../shared/services/cache.service';
+import { addSalesTax } from './tax.util';
 
 /**
  * Response shape for the scanner mobile app's variant lookup endpoints.
@@ -107,15 +108,29 @@ export class ProductsService {
       metaTitle: dto.metaTitle ?? dto.name,
       metaDescription: dto.metaDescription ?? dto.shortDescription,
       tags: dto.tags,
-      variants: variantSpecs.map((v, i) =>
-        this.variantRepo.create({
+      variants: variantSpecs.map((v, i) => {
+        // Selling prices are made tax-inclusive on create: a flat 7.5%
+        // is added to the entered retail/wholesale prices. Cost price and
+        // compare-at price are NOT taxed. See tax.util.ts.
+        const retailNgn = addSalesTax(v.retailPriceNgn);
+        const retailUsd = addSalesTax(v.retailPriceUsd);
+        return this.variantRepo.create({
           ...v,
-          // Default wholesale to retail if not provided, and vice versa
-          wholesalePriceNgn: v.wholesalePriceNgn ?? v.retailPriceNgn,
-          wholesalePriceUsd: v.wholesalePriceUsd ?? v.retailPriceUsd,
+          retailPriceNgn: retailNgn,
+          retailPriceUsd: retailUsd,
+          // Default wholesale to retail if not provided; either way the
+          // stored figure is tax-inclusive.
+          wholesalePriceNgn:
+            v.wholesalePriceNgn !== undefined
+              ? addSalesTax(v.wholesalePriceNgn)
+              : retailNgn,
+          wholesalePriceUsd:
+            v.wholesalePriceUsd !== undefined
+              ? addSalesTax(v.wholesalePriceUsd)
+              : retailUsd,
           sortOrder: i,
-        }),
-      ),
+        });
+      }),
     });
 
     const saved = await this.productRepo.save(product);
@@ -664,14 +679,24 @@ export class ProductsService {
       .getRawOne<{ max: string }>();
     const sortOrder = Number(maxSort?.max ?? -1) + 1;
 
+    // Selling prices are made tax-inclusive on create (flat 7.5%). Cost
+    // and compare-at prices are NOT taxed. See tax.util.ts.
+    const retailNgn = addSalesTax(dto.retailPriceNgn);
+    const retailUsd = addSalesTax(dto.retailPriceUsd);
     const variant = this.variantRepo.create({
       productId,
       sku,
       name: dto.name,
-      retailPriceNgn: dto.retailPriceNgn,
-      retailPriceUsd: dto.retailPriceUsd,
-      wholesalePriceNgn: dto.wholesalePriceNgn ?? dto.retailPriceNgn,
-      wholesalePriceUsd: dto.wholesalePriceUsd ?? dto.retailPriceUsd,
+      retailPriceNgn: retailNgn,
+      retailPriceUsd: retailUsd,
+      wholesalePriceNgn:
+        dto.wholesalePriceNgn !== undefined
+          ? addSalesTax(dto.wholesalePriceNgn)
+          : retailNgn,
+      wholesalePriceUsd:
+        dto.wholesalePriceUsd !== undefined
+          ? addSalesTax(dto.wholesalePriceUsd)
+          : retailUsd,
       compareAtPriceNgn: dto.compareAtPriceNgn,
       compareAtPriceUsd: dto.compareAtPriceUsd,
       costPriceNgn: dto.costPriceNgn,

@@ -77,6 +77,12 @@ export interface AnalyticsSummary {
     totalProducts: number;
     lowStockCount: number;
     pendingOrders: number;
+    /** Realised gross profit (NGN, minor units) for the window. */
+    profitNgn: number;
+    profitNgnPrev: number;
+    /** Sold order-items with a cost recorded / total — cost-data coverage. */
+    profitItemsCosted: number;
+    profitItemsTotal: number;
   };
 
   /** Daily/monthly trend for revenue + order count. Length = buckets. */
@@ -130,6 +136,8 @@ export class AnalyticsService {
       totalProducts,
       lowStockCount,
       pendingOrders,
+      profitCurrent,
+      profitPrev,
       trend,
       topProducts,
       statusBreakdown,
@@ -145,6 +153,8 @@ export class AnalyticsService {
       this.totalActiveProducts(),
       this.lowStockCount(),
       this.pendingOrderCount(),
+      this.profitTotals(windowStart, now),
+      this.profitTotals(prevWindowStart, windowStart),
       this.revenueTrend(windowStart, now, cfg.truncUnit),
       this.topProducts(windowStart, now),
       this.statusBreakdown(windowStart, now),
@@ -172,6 +182,10 @@ export class AnalyticsService {
         totalProducts,
         lowStockCount,
         pendingOrders,
+        profitNgn: profitCurrent.profitNgn,
+        profitNgnPrev: profitPrev.profitNgn,
+        profitItemsCosted: profitCurrent.itemsCosted,
+        profitItemsTotal: profitCurrent.itemsTotal,
       },
       trend: this.fillTrendGaps(trend, windowStart, now, cfg),
       topProducts,
@@ -182,6 +196,49 @@ export class AnalyticsService {
   }
 
   // ── Individual aggregations ──
+
+  /**
+   * Total realised gross profit (NGN) for the window.
+   *
+   * Profit = Σ over sold order-items of (sellingPrice − costPrice) × qty,
+   * for orders in a revenue status. Selling price is the order item's
+   * unitPrice (the tax-inclusive price actually charged); cost price is
+   * the variant's costPriceNgn. Items whose variant has no cost recorded
+   * contribute 0 profit — `itemsCosted` / `itemsTotal` lets the UI flag
+   * how complete the cost data is. NGN only — there is no USD cost field.
+   */
+  private async profitTotals(
+    from: Date,
+    to: Date,
+  ): Promise<{ profitNgn: number; itemsCosted: number; itemsTotal: number }> {
+    const row = await this.orderItems
+      .createQueryBuilder('oi')
+      .innerJoin('orders', 'o', 'o.id = oi."orderId"')
+      .leftJoin('product_variants', 'v', 'v.id = oi."variantId"')
+      .select(
+        // Only NGN orders; a line with no cost contributes 0 profit
+        // (cost falls back to the selling price → zero margin).
+        `COALESCE(SUM(
+           CASE WHEN o.currency = 'NGN'
+             THEN (oi."unitPrice" - COALESCE(v."costPriceNgn", oi."unitPrice")) * oi.quantity
+             ELSE 0 END
+         ), 0)`,
+        'profit',
+      )
+      .addSelect(
+        `COUNT(*) FILTER (WHERE v."costPriceNgn" IS NOT NULL AND o.currency = 'NGN')`,
+        'costed',
+      )
+      .addSelect(`COUNT(*) FILTER (WHERE o.currency = 'NGN')`, 'total')
+      .where('o.status IN (:...statuses)', { statuses: REVENUE_STATUSES })
+      .andWhere('o."createdAt" >= :from AND o."createdAt" < :to', { from, to })
+      .getRawOne<{ profit: string; costed: string; total: string }>();
+    return {
+      profitNgn: Number(row?.profit ?? 0),
+      itemsCosted: Number(row?.costed ?? 0),
+      itemsTotal: Number(row?.total ?? 0),
+    };
+  }
 
   private async revenueTotals(from: Date, to: Date): Promise<CurrencyTotals> {
     // Two SUMs in a single round-trip via CASE/FILTER.
