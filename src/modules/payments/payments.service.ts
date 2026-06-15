@@ -416,12 +416,11 @@ export class PaymentsService {
     const provider = this.providers.get(providerName);
     if (!provider) return payment;
 
-    // Paystack verifies by the reference it was given (= merchantReference);
-    // Moniepoint by its own transaction reference.
-    const verifyRef =
-      payment.provider === PaymentProvider.PAYSTACK
-        ? payment.merchantReference
-        : (payment.providerReference ?? payment.merchantReference);
+    // Both providers look up by the reference we gave them at creation
+    // time, which is our merchantReference. Paystack uses it as the
+    // transaction `reference`; Moniepoint's terminal-status endpoint is
+    // GET /v1/transactions/merchants/{merchantReference}.
+    const verifyRef = payment.merchantReference;
 
     let intent: PaymentIntent;
     try {
