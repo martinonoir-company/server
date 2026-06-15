@@ -71,22 +71,148 @@ function mapProcessingStatus(s: string | undefined): PaymentIntentStatus {
   }
 }
 
+/** Cached OAuth access token. */
+interface CachedToken {
+  token: string;
+  /** Epoch ms after which the token must not be used. */
+  expiresAt: number;
+}
+
 @Injectable()
 export class MoniepointProvider implements IPaymentProvider {
   readonly name = PaymentProviderName.MONIEPOINT;
   private readonly logger = new Logger(MoniepointProvider.name);
-  private readonly apiKey: string;
+  private readonly clientId: string;
+  private readonly clientSecret: string;
   private readonly baseUrl: string;
+  private readonly tokenUrl: string;
   private readonly isLive: boolean;
 
+  /**
+   * In-memory access-token cache. Moniepoint POS auth is OAuth
+   * client-credentials — we exchange clientId+clientSecret for a
+   * short-lived bearer token, cache it until just before expiry, and
+   * refresh on demand or on a 401.
+   */
+  private cachedToken: CachedToken | null = null;
+  private tokenFetchInFlight: Promise<string> | null = null;
+  /** Refresh the token this many ms before its real expiry. */
+  private static readonly TOKEN_SKEW_MS = 30_000;
+
   constructor() {
-    this.apiKey = process.env['MONIEPOINT_API_KEY'] ?? '';
+    this.clientId = process.env['MONIEPOINT_CLIENT_ID'] ?? '';
+    this.clientSecret = process.env['MONIEPOINT_CLIENT_SECRET'] ?? '';
     this.baseUrl =
       process.env['MONIEPOINT_BASE_URL'] ?? 'https://api.pos.moniepoint.com';
-    this.isLive = !!this.apiKey;
+    // Default to the same host's /oauth/token; override only if Moniepoint
+    // hosts their auth on a separate domain in your environment.
+    this.tokenUrl =
+      process.env['MONIEPOINT_TOKEN_URL'] ?? `${this.baseUrl}/oauth/token`;
+    this.isLive = !!(this.clientId && this.clientSecret);
     if (!this.isLive) {
-      this.logger.warn('MONIEPOINT_API_KEY not set — running in stub mode');
+      this.logger.warn(
+        'MONIEPOINT_CLIENT_ID / MONIEPOINT_CLIENT_SECRET not set — running in stub mode',
+      );
     }
+  }
+
+  /**
+   * Get a valid access token, refreshing if it's missing or near expiry.
+   * Concurrent callers share a single refresh attempt so we don't fire
+   * multiple token requests under load.
+   */
+  private async getAccessToken(): Promise<string> {
+    const now = Date.now();
+    if (this.cachedToken && this.cachedToken.expiresAt > now) {
+      return this.cachedToken.token;
+    }
+    if (this.tokenFetchInFlight) return this.tokenFetchInFlight;
+
+    this.tokenFetchInFlight = this.fetchAccessToken()
+      .then((tok) => {
+        this.cachedToken = tok;
+        return tok.token;
+      })
+      .finally(() => {
+        this.tokenFetchInFlight = null;
+      });
+    return this.tokenFetchInFlight;
+  }
+
+  /** Force a token refresh on the next call (used after a 401). */
+  private invalidateToken(): void {
+    this.cachedToken = null;
+  }
+
+  /**
+   * Exchange client credentials for an access token. Moniepoint returns
+   * `{ accessToken, tokenType: "bearer", expiresIn, scope, jti }`.
+   */
+  private async fetchAccessToken(): Promise<CachedToken> {
+    const basic = Buffer.from(`${this.clientId}:${this.clientSecret}`).toString(
+      'base64',
+    );
+    const body = new URLSearchParams({ grant_type: 'client_credentials' });
+
+    const res = await fetch(this.tokenUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${basic}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+      },
+      body: body.toString(),
+    });
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) {
+      this.logger.error(
+        `Moniepoint token exchange failed (${res.status}): ${JSON.stringify(data)}`,
+      );
+      throw new Error(
+        (data['error_description'] as string) ??
+          (data['message'] as string) ??
+          `Token exchange failed (${res.status})`,
+      );
+    }
+    const token =
+      (data['accessToken'] as string) ?? (data['access_token'] as string);
+    const expiresIn =
+      (data['expiresIn'] as number) ?? (data['expires_in'] as number) ?? 300;
+    if (!token) {
+      throw new Error('Moniepoint token response missing accessToken');
+    }
+    return {
+      token,
+      expiresAt:
+        Date.now() + Math.max(0, expiresIn * 1000 - MoniepointProvider.TOKEN_SKEW_MS),
+    };
+  }
+
+  /**
+   * Authenticated fetch against the Moniepoint POS API. Attaches a fresh
+   * bearer token and retries once on 401 with a forced token refresh.
+   */
+  private async authedFetch(
+    path: string,
+    init: RequestInit,
+  ): Promise<Response> {
+    const doFetch = async (token: string) =>
+      fetch(`${this.baseUrl}${path}`, {
+        ...init,
+        headers: {
+          ...(init.headers as Record<string, string> | undefined),
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+    let token = await this.getAccessToken();
+    let res = await doFetch(token);
+    if (res.status === 401) {
+      this.invalidateToken();
+      token = await this.getAccessToken();
+      res = await doFetch(token);
+    }
+    return res;
   }
 
   // ── POS terminal API ──
@@ -116,12 +242,9 @@ export class MoniepointProvider implements IPaymentProvider {
     }
 
     try {
-      const res = await fetch(`${this.baseUrl}/v1/transactions`, {
+      const res = await this.authedFetch(`/v1/transactions`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           terminalSerial: input.terminalSerial,
           amount: input.amount,
@@ -187,9 +310,9 @@ export class MoniepointProvider implements IPaymentProvider {
     }
 
     try {
-      const res = await fetch(
-        `${this.baseUrl}/v1/transactions/merchants/${encodeURIComponent(merchantReference)}`,
-        { headers: { Authorization: `Bearer ${this.apiKey}` } },
+      const res = await this.authedFetch(
+        `/v1/transactions/merchants/${encodeURIComponent(merchantReference)}`,
+        { method: 'GET' },
       );
       const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
 
