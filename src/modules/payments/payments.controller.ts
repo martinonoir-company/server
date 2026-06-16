@@ -12,6 +12,9 @@ import {
   HttpStatus,
   RawBodyRequest,
   Logger,
+  Inject,
+  forwardRef,
+  Optional,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -25,6 +28,7 @@ import {
 } from './entities/payment.entity';
 import { Order } from '../orders/entities/order.entity';
 import { Terminal } from '../branches/entities/terminal.entity';
+import { RefundsService } from '../refunds/refunds.service';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { Public } from '../../shared/decorators/public.decorator';
 import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
@@ -76,6 +80,12 @@ export class PaymentsController {
     private readonly orderRepo: Repository<Order>,
     @InjectRepository(Terminal)
     private readonly terminalRepo: Repository<Terminal>,
+    // Optional + forwardRef avoids the PaymentsModule ↔ RefundsModule
+    // circular import. If the refunds module isn't wired (e.g. in a unit
+    // test), the webhook still works for payment reconciliation.
+    @Optional()
+    @Inject(forwardRef(() => RefundsService))
+    private readonly refundsService?: RefundsService,
   ) {}
 
   // ── Admin: payment records ──
@@ -302,14 +312,55 @@ export class PaymentsController {
       return { received: false };
     }
 
-    // Parse only to find which payment to reconcile. The reference Paystack
-    // echoes back is our merchantReference.
+    // Parse only to find which payment / refund to settle. Paystack echoes
+    // our merchantReference back as `data.reference`; refund events carry
+    // the `transaction` object the refund applies to; transfer events
+    // carry the transfer_code as `data.transfer_code`.
     try {
       const event = JSON.parse(rawBody.toString()) as {
         event?: string;
-        data?: { reference?: string };
+        data?: Record<string, unknown>;
       };
-      const reference = event.data?.reference;
+      const eventName = event.event ?? '';
+      const data = event.data ?? {};
+
+      // ── Refund settlement ──
+      if (eventName.startsWith('refund.')) {
+        const refundId =
+          (data['id'] as string | number | undefined)?.toString() ?? null;
+        if (refundId && this.refundsService) {
+          const outcome =
+            eventName === 'refund.processed' ? 'SUCCEEDED' : 'FAILED';
+          await this.refundsService.settleByProviderReference(
+            refundId,
+            outcome,
+            event as unknown as Record<string, unknown>,
+            (data['message'] as string) ?? undefined,
+          );
+        }
+        return { received: true };
+      }
+
+      // ── Transfer settlement (Paystack transfer refunds) ──
+      if (eventName.startsWith('transfer.')) {
+        const transferCode = data['transfer_code'] as string | undefined;
+        const ref = data['reference'] as string | undefined;
+        const identifier = transferCode ?? ref ?? null;
+        if (identifier && this.refundsService) {
+          const outcome =
+            eventName === 'transfer.success' ? 'SUCCEEDED' : 'FAILED';
+          await this.refundsService.settleByProviderReference(
+            identifier,
+            outcome,
+            event as unknown as Record<string, unknown>,
+            (data['message'] as string) ?? undefined,
+          );
+        }
+        return { received: true };
+      }
+
+      // ── Default: original-charge reconciliation ──
+      const reference = data['reference'] as string | undefined;
       if (reference) {
         const payment =
           await this.paymentsService.findByMerchantReference(reference);

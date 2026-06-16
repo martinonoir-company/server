@@ -40,6 +40,11 @@ export enum Permission {
   PAYMENTS_READ = 'payments:read',
   PAYMENTS_REFUND = 'payments:refund',
 
+  // Refunds (super-admin workflow)
+  REFUNDS_VIEW = 'refunds:view',
+  REFUNDS_PROCESS = 'refunds:process',
+  POS_REFUND_CASH = 'pos:refund_cash',
+
   // Coupons
   COUPONS_READ = 'coupons:read',
   COUPONS_CREATE = 'coupons:create',
@@ -124,6 +129,7 @@ export const SYSTEM_ROLES: Array<{ name: string; description: string; permission
       Permission.INVENTORY_ADJUST,
       Permission.CUSTOMERS_READ,
       Permission.POS_SELL,
+      Permission.POS_REFUND_CASH,
       Permission.COUPONS_READ,
     ],
   },

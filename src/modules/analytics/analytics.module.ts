@@ -6,9 +6,13 @@ import { User } from '../users/entities/user.entity';
 import { StockLevel } from '../inventory/entities/inventory.entity';
 import { AnalyticsController } from './analytics.controller';
 import { AnalyticsService } from './analytics.service';
+import { RefundsModule } from '../refunds/refunds.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Order, OrderItem, Product, ProductVariant, User, StockLevel])],
+  imports: [
+    TypeOrmModule.forFeature([Order, OrderItem, Product, ProductVariant, User, StockLevel]),
+    RefundsModule,
+  ],
   controllers: [AnalyticsController],
   providers: [AnalyticsService],
   exports: [AnalyticsService],

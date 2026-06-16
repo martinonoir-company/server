@@ -175,6 +175,146 @@ export class PaystackProvider implements IPaymentProvider {
     };
   }
 
+  // ── Bank verification + transfer (used by the refund flow) ──
+
+  /**
+   * Resolve a Nigerian bank account number against Paystack. Confirms the
+   * account exists at the chosen bank and returns the account holder's
+   * name — the POS uses this to make the cashier confirm the name with
+   * the customer before submitting a refund request, which is the only
+   * defence against typos in the account number.
+   */
+  async resolveBankAccount(input: {
+    accountNumber: string;
+    bankCode: string;
+  }): Promise<{ accountName: string } | { error: string }> {
+    if (!this.isLive) {
+      // Stub mirrors the success shape so the UI path can be exercised
+      // without contacting Paystack.
+      return { accountName: `STUB ACCOUNT ${input.accountNumber.slice(-4)}` };
+    }
+    const url = new URL('https://api.paystack.co/bank/resolve');
+    url.searchParams.set('account_number', input.accountNumber);
+    url.searchParams.set('bank_code', input.bankCode);
+    const res = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${this.secretKey}` },
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      status?: boolean;
+      message?: string;
+      data?: { account_name?: string };
+    };
+    if (!data.status || !data.data?.account_name) {
+      return { error: data.message ?? 'Could not verify account' };
+    }
+    return { accountName: data.data.account_name };
+  }
+
+  /** List of Paystack-supported Nigerian banks (code + name). */
+  async listBanks(): Promise<Array<{ name: string; code: string }>> {
+    if (!this.isLive) {
+      return [
+        { name: 'Access Bank', code: '044' },
+        { name: 'GTBank', code: '058' },
+        { name: 'Zenith Bank', code: '057' },
+        { name: 'UBA', code: '033' },
+        { name: 'First Bank', code: '011' },
+      ];
+    }
+    const res = await fetch(
+      'https://api.paystack.co/bank?country=nigeria&currency=NGN',
+      { headers: { Authorization: `Bearer ${this.secretKey}` } },
+    );
+    const data = (await res.json().catch(() => ({}))) as {
+      status?: boolean;
+      data?: Array<{ name: string; code: string }>;
+    };
+    return data.data ?? [];
+  }
+
+  /**
+   * Create or fetch a Paystack transfer recipient for this bank account.
+   * The returned `recipient_code` is cached on the refund request so retries
+   * don't create duplicate recipients.
+   */
+  async createTransferRecipient(input: {
+    accountNumber: string;
+    bankCode: string;
+    accountName: string;
+  }): Promise<{ recipientCode: string } | { error: string }> {
+    if (!this.isLive) {
+      return { recipientCode: `RCP_STUB_${generateUlid()}` };
+    }
+    const res = await fetch('https://api.paystack.co/transferrecipient', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'nuban',
+        name: input.accountName,
+        account_number: input.accountNumber,
+        bank_code: input.bankCode,
+        currency: 'NGN',
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      status?: boolean;
+      message?: string;
+      data?: { recipient_code?: string };
+    };
+    if (!data.status || !data.data?.recipient_code) {
+      return { error: data.message ?? 'Could not create transfer recipient' };
+    }
+    return { recipientCode: data.data.recipient_code };
+  }
+
+  /**
+   * Initiate a Paystack transfer to a previously created recipient. The
+   * caller passes our own merchant reference so we can correlate the
+   * webhook back to a refund row.
+   */
+  async initiateTransfer(input: {
+    recipientCode: string;
+    amount: number; // minor units (kobo)
+    reason: string;
+    reference: string;
+  }): Promise<
+    | { providerReference: string; status: 'PENDING' | 'SUCCEEDED' }
+    | { error: string }
+  > {
+    if (!this.isLive) {
+      return { providerReference: `TRF_STUB_${generateUlid()}`, status: 'PENDING' };
+    }
+    const res = await fetch('https://api.paystack.co/transfer', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        source: 'balance',
+        amount: input.amount,
+        recipient: input.recipientCode,
+        reason: input.reason,
+        reference: input.reference,
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      status?: boolean;
+      message?: string;
+      data?: { transfer_code?: string; status?: string; reference?: string };
+    };
+    if (!data.status || !data.data?.transfer_code) {
+      return { error: data.message ?? 'Transfer failed' };
+    }
+    return {
+      providerReference: data.data.transfer_code,
+      status: data.data.status === 'success' ? 'SUCCEEDED' : 'PENDING',
+    };
+  }
+
   verifyWebhookSignature(payload: WebhookPayload): boolean {
     if (!this.isLive) {
       this.logger.log('[STUB] Paystack webhook signature verification bypassed');

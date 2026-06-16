@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PaymentsService } from './payments.service';
 import { PaymentsController } from './payments.controller';
@@ -8,11 +8,16 @@ import { StripeProvider } from './providers/stripe.provider';
 import { Payment } from './entities/payment.entity';
 import { Order } from '../orders/entities/order.entity';
 import { Terminal } from '../branches/entities/terminal.entity';
+import { RefundsModule } from '../refunds/refunds.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Payment, Order, Terminal])],
+  imports: [
+    TypeOrmModule.forFeature([Payment, Order, Terminal]),
+    // The Paystack webhook forwards refund/transfer events to RefundsService.
+    forwardRef(() => RefundsModule),
+  ],
   controllers: [PaymentsController],
   providers: [PaymentsService, MoniepointProvider, PaystackProvider, StripeProvider],
-  exports: [PaymentsService],
+  exports: [PaymentsService, PaystackProvider],
 })
 export class PaymentsModule {}

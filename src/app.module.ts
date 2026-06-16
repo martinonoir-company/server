@@ -32,6 +32,7 @@ import { CartModule } from './modules/cart/cart.module';
 import { BranchesModule } from './modules/branches/branches.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { PosSessionsModule } from './modules/pos-sessions/pos-sessions.module';
+import { RefundsModule } from './modules/refunds/refunds.module';
 
 @Module({
   imports: [
@@ -94,6 +95,7 @@ import { PosSessionsModule } from './modules/pos-sessions/pos-sessions.module';
     BranchesModule,
     RealtimeModule,
     PosSessionsModule,
+    RefundsModule,
   ],
   controllers: [AppController],
   providers: [

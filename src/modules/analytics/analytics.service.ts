@@ -5,6 +5,7 @@ import { Order, OrderItem, OrderStatus } from '../orders/entities/order.entity';
 import { Product, ProductVariant } from '../products/entities/product.entity';
 import { User, UserRole } from '../users/entities/user.entity';
 import { StockLevel } from '../inventory/entities/inventory.entity';
+import { RefundsService } from '../refunds/refunds.service';
 
 export type AnalyticsRange = '7d' | '30d' | '90d' | '12m';
 
@@ -83,6 +84,12 @@ export interface AnalyticsSummary {
     /** Sold order-items with a cost recorded / total — cost-data coverage. */
     profitItemsCosted: number;
     profitItemsTotal: number;
+    /** Total refunded (NGN, minor units) inside the window. */
+    refundedNgn: number;
+    refundedNgnPrev: number;
+    /** Physical units returned + refund requests behind that figure. */
+    refundedItemsCount: number;
+    refundedRequestsCount: number;
   };
 
   /** Daily/monthly trend for revenue + order count. Length = buckets. */
@@ -116,6 +123,7 @@ export class AnalyticsService {
     @InjectRepository(ProductVariant) private readonly variants: Repository<ProductVariant>,
     @InjectRepository(User) private readonly users: Repository<User>,
     @InjectRepository(StockLevel) private readonly stockLevels: Repository<StockLevel>,
+    private readonly refundsService: RefundsService,
   ) {}
 
   async getSummary(range: AnalyticsRange): Promise<AnalyticsSummary> {
@@ -138,6 +146,8 @@ export class AnalyticsService {
       pendingOrders,
       profitCurrent,
       profitPrev,
+      refundsCurrent,
+      refundsPrev,
       trend,
       topProducts,
       statusBreakdown,
@@ -155,6 +165,8 @@ export class AnalyticsService {
       this.pendingOrderCount(),
       this.profitTotals(windowStart, now),
       this.profitTotals(prevWindowStart, windowStart),
+      this.refundsService.totalsRefunded(windowStart, now),
+      this.refundsService.totalsRefunded(prevWindowStart, windowStart),
       this.revenueTrend(windowStart, now, cfg.truncUnit),
       this.topProducts(windowStart, now),
       this.statusBreakdown(windowStart, now),
@@ -186,6 +198,10 @@ export class AnalyticsService {
         profitNgnPrev: profitPrev.profitNgn,
         profitItemsCosted: profitCurrent.itemsCosted,
         profitItemsTotal: profitCurrent.itemsTotal,
+        refundedNgn: refundsCurrent.amountNgn,
+        refundedNgnPrev: refundsPrev.amountNgn,
+        refundedItemsCount: refundsCurrent.itemsCount,
+        refundedRequestsCount: refundsCurrent.requestsCount,
       },
       trend: this.fillTrendGaps(trend, windowStart, now, cfg),
       topProducts,
