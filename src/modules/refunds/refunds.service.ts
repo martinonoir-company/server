@@ -141,6 +141,7 @@ export class RefundsService {
    */
   async createFromReturn(input: {
     orderId: string;
+    /** May be empty when the cashier skips the item scan. */
     lines: RefundLineInput[];
     warehouseCode?: string;
     /** Customer-stated reason for the whole return. */
@@ -153,6 +154,15 @@ export class RefundsService {
       accountNumber: string;
       accountName: string;
     };
+    /**
+     * Override the refund total (minor units). If set:
+     *  - Replaces the sum of item line totals (e.g. when shipping was
+     *    refunded too, or a partial refund is being offered).
+     *  - REQUIRED when `lines` is empty (skipped item scan).
+     *  - Capped at the order's grand total — we never refund more than
+     *    the customer originally paid.
+     */
+    customAmount?: number;
     createdBy: string;
   }): Promise<RefundRequest> {
     const order = await this.orderRepo.findOne({
@@ -182,7 +192,7 @@ export class RefundsService {
     // unitPrice from the order, not the current variant price — the
     // customer should be refunded what they paid.
     const itemsByVariant = new Map(order.items?.map((i) => [i.variantId, i]));
-    let totalRefundMinor = 0;
+    let computedTotalMinor = 0;
     let totalUnits = 0;
     const itemRows: Partial<RefundRequestItem>[] = [];
 
@@ -199,7 +209,7 @@ export class RefundsService {
         );
       }
       const lineTotal = Number(oi.unitPrice) * line.quantity;
-      totalRefundMinor += lineTotal;
+      computedTotalMinor += lineTotal;
       totalUnits += line.quantity;
       itemRows.push({
         orderItemId: oi.id,
@@ -213,6 +223,33 @@ export class RefundsService {
         reasonCode: line.reasonCode,
         reasonNote: line.reasonNote,
       });
+    }
+
+    // Resolve the actual amount we'll refund.
+    //
+    //  - lines + no customAmount  → sum of line totals
+    //  - lines + customAmount     → override (partial refund or includes
+    //                               shipping). Must not exceed the order
+    //                               grand total.
+    //  - no lines + customAmount  → skip-scan flow; the cashier inspects
+    //                               items physically and just enters the
+    //                               amount to refund.
+    //  - no lines + no amount     → invalid
+    let totalRefundMinor: number;
+    if (input.customAmount && input.customAmount > 0) {
+      const orderTotal = Number(order.grandTotal);
+      if (input.customAmount > orderTotal) {
+        throw new BadRequestException(
+          `Refund amount (${input.customAmount}) exceeds order total (${orderTotal}).`,
+        );
+      }
+      totalRefundMinor = Math.round(input.customAmount);
+    } else if (input.lines.length === 0) {
+      throw new BadRequestException(
+        'Either scan items or provide a refund amount.',
+      );
+    } else {
+      totalRefundMinor = computedTotalMinor;
     }
 
     // Find the original payment(s) — prefer one SUCCEEDED row matching the
@@ -384,13 +421,31 @@ export class RefundsService {
    * Super-admin approves a PENDING request and executes the refund.
    * Paystack refund is fire-and-confirm-via-webhook; we set PROCESSING
    * here and the webhook flips to SUCCEEDED/FAILED.
+   *
+   * `amountOverride` (minor units) lets the super admin reduce the
+   * refund before sending it to the provider — useful for partial
+   * refunds or when shipping/logistics should be retained. Cannot
+   * exceed the original order's grand total.
    */
-  async approve(id: string, decidedBy: string): Promise<RefundRequest> {
+  async approve(
+    id: string,
+    decidedBy: string,
+    amountOverride?: number,
+  ): Promise<RefundRequest> {
     const r = await this.findById(id);
     if (r.status !== RefundStatus.PENDING) {
       throw new BadRequestException(
         `Refund is ${r.status}; only PENDING can be approved.`,
       );
+    }
+    if (amountOverride && amountOverride > 0) {
+      const orderTotal = Number(r.order?.grandTotal ?? 0);
+      if (orderTotal > 0 && amountOverride > orderTotal) {
+        throw new BadRequestException(
+          `Refund amount (${amountOverride}) exceeds order total (${orderTotal}).`,
+        );
+      }
+      r.amount = Math.round(amountOverride);
     }
     r.decidedBy = decidedBy;
     r.decidedAt = new Date();

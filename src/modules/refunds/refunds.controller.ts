@@ -58,6 +58,17 @@ class CreateRefundFromReturnDto {
     accountNumber: string;
     accountName: string;
   };
+  /** Custom refund total in minor units. Required when `lines` is empty. */
+  @IsOptional() @IsInt() @Min(1) customAmount?: number;
+}
+
+class ApproveRefundDto {
+  /**
+   * Optional override of the refund amount, in minor units. Super admin
+   * uses this when the original request needs reducing (e.g. partial
+   * refund) before sending it to Paystack.
+   */
+  @IsOptional() @IsInt() @Min(1) amount?: number;
 }
 
 class VerifyBankAccountDto {
@@ -110,6 +121,7 @@ export class RefundsController {
       reason: dto.reason,
       posCashRefund: dto.posCashRefund,
       bankDetails: dto.bankDetails,
+      customAmount: dto.customAmount,
       createdBy: user.id,
     });
     return { data: refund };
@@ -171,8 +183,12 @@ export class RefundsController {
 
   @Post(':id/approve')
   @RequirePermissions(Permission.REFUNDS_PROCESS)
-  async approve(@Param('id') id: string, @CurrentUser() user: User) {
-    const data = await this.refundsService.approve(id, user.id);
+  async approve(
+    @Param('id') id: string,
+    @Body() dto: ApproveRefundDto,
+    @CurrentUser() user: User,
+  ) {
+    const data = await this.refundsService.approve(id, user.id, dto.amount);
     return { data };
   }
 
