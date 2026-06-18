@@ -113,6 +113,12 @@ export class ConfirmSessionDto {
   @IsString()
   @MaxLength(30)
   customerPhone?: string;
+
+  /** Marketing-agent referral code captured at the till. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  agentCode?: string;
 }
 
 /** POST /pos-sessions/:terminalCode/void */

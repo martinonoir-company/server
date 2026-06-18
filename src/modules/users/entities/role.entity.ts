@@ -79,6 +79,14 @@ export enum Permission {
 
   // Branches
   BRANCHES_MANAGE = 'branches:manage',
+
+  // Marketing agents (super-admin workflow + agent self-service)
+  AGENTS_VIEW = 'agents:view',
+  AGENTS_APPROVE = 'agents:approve',
+  AGENTS_PAYOUT = 'agents:payout',
+  AGENTS_COMMISSION_SET = 'agents:commission_set',
+  /** Capability for the agent's own session — never given to staff roles. */
+  AGENT_SELF = 'agent:self',
 }
 
 /**
@@ -148,5 +156,10 @@ export const SYSTEM_ROLES: Array<{ name: string; description: string; permission
     name: 'CUSTOMER',
     description: 'Registered customer — storefront access only',
     permissions: [],
+  },
+  {
+    name: 'MARKETING_AGENT',
+    description: 'Marketing agent — agent dashboard access only',
+    permissions: [Permission.AGENT_SELF],
   },
 ];

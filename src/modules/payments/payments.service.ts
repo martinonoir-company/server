@@ -1,4 +1,12 @@
-import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+  Logger,
+  Inject,
+  forwardRef,
+  Optional,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import {
@@ -22,6 +30,7 @@ import {
   PaymentStatus,
 } from './entities/payment.entity';
 import { Order, OrderStatus } from '../orders/entities/order.entity';
+import { AgentsService } from '../agents/agents.service';
 
 /** Input to record/begin a payment row. */
 export interface RecordPaymentInput {
@@ -62,6 +71,13 @@ export class PaymentsService {
     @InjectRepository(Order)
     private readonly orderRepo: Repository<Order>,
     private readonly dataSource: DataSource,
+    // Optional + forwardRef avoids the PaymentsModule ↔ AgentsModule
+    // circular import. When the agents module isn't wired (e.g. in a
+    // narrow test), payments still flow normally — only the post-PAID
+    // attribution hook is skipped.
+    @Optional()
+    @Inject(forwardRef(() => AgentsService))
+    private readonly agentsService?: AgentsService,
   ) {
     this.providers = new Map<PaymentProviderName, IPaymentProvider>([
       [PaymentProviderName.MONIEPOINT, moniepoint],
@@ -173,7 +189,8 @@ export class PaymentsService {
       rawProviderData?: Record<string, unknown> | null;
     },
   ): Promise<Payment> {
-    return this.dataSource.transaction(async (manager) => {
+    let orderJustPaidId: string | null = null;
+    const saved = await this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(Payment);
       const payment = await repo.findOne({ where: { id: paymentId } });
       if (!payment) throw new NotFoundException(`Payment ${paymentId} not found`);
@@ -204,14 +221,28 @@ export class PaymentsService {
       if (next.status === PaymentStatus.SUCCEEDED && !payment.paidAt) {
         payment.paidAt = new Date();
       }
-      const saved = await repo.save(payment);
+      const out = await repo.save(payment);
 
-      // Recompute whether the order is now fully paid.
+      // Recompute whether the order is now fully paid. recomputeOrderPaid
+      // returns true on the exact transition into PAID so we can fire
+      // post-commit side-effects (agent attribution) at most once.
       if (next.status === PaymentStatus.SUCCEEDED) {
-        await this.recomputeOrderPaid(manager, payment.orderId);
+        const transitioned = await this.recomputeOrderPaid(
+          manager,
+          payment.orderId,
+        );
+        if (transitioned) orderJustPaidId = payment.orderId;
       }
-      return saved;
+      return out;
     });
+
+    // Post-commit side-effect: credit the marketing agent if this order
+    // carried an agentCode. The hook is idempotent (unique on orderId)
+    // so it's safe even if a retry runs the same applyProviderState call.
+    if (orderJustPaidId) {
+      await this.fireOrderPaidHooks(orderJustPaidId);
+    }
+    return saved;
   }
 
   /** Store a raw webhook body against a payment for audit. Never sets state. */
@@ -232,10 +263,10 @@ export class PaymentsService {
   private async recomputeOrderPaid(
     manager: import('typeorm').EntityManager,
     orderId: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const orderRepo = manager.getRepository(Order);
     const order = await orderRepo.findOne({ where: { id: orderId } });
-    if (!order) return;
+    if (!order) return false;
 
     const row = await manager
       .getRepository(Payment)
@@ -256,6 +287,28 @@ export class PaymentsService {
         order.status = OrderStatus.PAID;
         order.paidAt = new Date();
         await orderRepo.save(order);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Side-effects to run AFTER the recomputeOrderPaid transaction commits
+   * — currently just marketing-agent attribution. Failure must NOT bubble
+   * back into the payment flow; the order is already PAID and the customer
+   * has been charged. Errors are logged for super-admin follow-up.
+   */
+  private async fireOrderPaidHooks(orderId: string): Promise<void> {
+    if (this.agentsService) {
+      try {
+        await this.agentsService.applyAttributionOnPaid(orderId);
+      } catch (err) {
+        this.logger.error(
+          `Agent attribution failed for order ${orderId}: ${
+            (err as Error).message
+          }`,
+        );
       }
     }
   }

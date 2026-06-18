@@ -95,6 +95,7 @@ export class RolesGuard implements CanActivate {
       [UserRole.COMPANY_SUPER_ADMIN]: 'COMPANY_SUPER_ADMIN',
       [UserRole.COMPANY_STAFF]: 'COMPANY_STAFF',
       [UserRole.CUSTOMER]: 'CUSTOMER',
+      [UserRole.MARKETING_AGENT]: 'MARKETING_AGENT',
     };
     return mapping[userRole] ?? 'CUSTOMER';
   }

@@ -106,6 +106,12 @@ export class PosTransactionDto {
   @IsOptional()
   @IsString()
   customerPhone?: string;
+
+  /** Marketing-agent referral code entered at the till (optional). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  agentCode?: string;
 }
 
 export class PosSyncBatchDto {

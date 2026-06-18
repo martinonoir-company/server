@@ -33,6 +33,7 @@ import { BranchesModule } from './modules/branches/branches.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { PosSessionsModule } from './modules/pos-sessions/pos-sessions.module';
 import { RefundsModule } from './modules/refunds/refunds.module';
+import { AgentsModule } from './modules/agents/agents.module';
 
 @Module({
   imports: [
@@ -96,6 +97,7 @@ import { RefundsModule } from './modules/refunds/refunds.module';
     RealtimeModule,
     PosSessionsModule,
     RefundsModule,
+    AgentsModule,
   ],
   controllers: [AppController],
   providers: [

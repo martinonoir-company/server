@@ -60,6 +60,15 @@ export class CreateOrderDto {
   @IsOptional()
   @IsString() @MaxLength(64)
   idempotencyKey?: string;
+
+  /**
+   * Marketing-agent referral code captured at checkout. Server validates
+   * the code against an APPROVED agent and stores it on the order;
+   * commission is credited when the order reaches PAID.
+   */
+  @IsOptional()
+  @IsString() @MaxLength(16)
+  agentCode?: string;
 }
 
 export class UpdateOrderStatusDto {

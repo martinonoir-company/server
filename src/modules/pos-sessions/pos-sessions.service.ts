@@ -351,6 +351,7 @@ export class PosSessionsService {
       discountType: session.cart.discountType ?? undefined,
       customerName: dto.customerName,
       customerPhone: dto.customerPhone,
+      agentCode: dto.agentCode,
     };
 
     const result = await this.posSyncService.processTransaction(tx);

@@ -11,6 +11,7 @@ import { Payment } from '../payments/entities/payment.entity';
 import { StockMovement } from '../inventory/entities/inventory.entity';
 import { InventoryModule } from '../inventory/inventory.module';
 import { PaymentsModule } from '../payments/payments.module';
+import { AgentsModule } from '../agents/agents.module';
 
 @Module({
   imports: [
@@ -25,8 +26,11 @@ import { PaymentsModule } from '../payments/payments.module';
     InventoryModule,
     // PaymentsModule re-exports PaystackProvider; refunds also needs to
     // be optionally injectable INTO PaymentsController (for webhook
-    // settlement), so use forwardRef on both sides.
+    // settlement), so use forwardRef on both sides. AgentsModule is
+    // forwardRef'd because the refund flow tells AgentsService to
+    // reverse the agent commission on an order-refund.
     forwardRef(() => PaymentsModule),
+    forwardRef(() => AgentsModule),
   ],
   controllers: [RefundsController],
   providers: [RefundsService],

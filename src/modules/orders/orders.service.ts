@@ -151,6 +151,12 @@ export class OrdersService {
           couponCode: dto.couponCode,
           customerNote: dto.customerNote,
           idempotencyKey: dto.idempotencyKey,
+          // Uppercased agent code captured at checkout (storefront /
+          // mobile / POS). The PAID hook in PaymentsService.applyProviderState
+          // reads this and credits the agent's wallet. Stored even when the
+          // order is still DRAFT/PENDING_PAYMENT so it survives the gap
+          // between checkout and Paystack settling.
+          agentCode: dto.agentCode?.trim().toUpperCase() || null,
           items: orderItems.map((item) => manager.create(OrderItem, item)),
           statusHistory: [
             manager.create(OrderStatusHistory, {

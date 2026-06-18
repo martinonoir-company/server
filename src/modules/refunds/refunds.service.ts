@@ -4,6 +4,9 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  Inject,
+  forwardRef,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
@@ -32,6 +35,7 @@ import {
   StockMovement,
 } from '../inventory/entities/inventory.entity';
 import { PaystackProvider } from '../payments/providers/paystack.provider';
+import { AgentsService } from '../agents/agents.service';
 
 interface RefundLineInput {
   orderItemId?: string;
@@ -72,6 +76,9 @@ export class RefundsService {
     private readonly inventoryService: InventoryService,
     private readonly paystack: PaystackProvider,
     private readonly dataSource: DataSource,
+    @Optional()
+    @Inject(forwardRef(() => AgentsService))
+    private readonly agentsService?: AgentsService,
   ) {}
 
   // ── Look up an order by its order number for the scanner UI ──
@@ -632,5 +639,12 @@ export class RefundsService {
       { id: orderId },
       { status: OrderStatus.REFUNDED },
     );
+    // Reverse any earned agent commission on this order. The agents
+    // service handles the idempotency; if the order had no agentCode or
+    // the attribution was already REVERSED, this is a no-op. We never
+    // block the refund on this — failure is logged inside the service.
+    if (this.agentsService) {
+      await this.agentsService.reverseAttributionOnRefund(orderId);
+    }
   }
 }

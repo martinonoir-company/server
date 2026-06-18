@@ -109,6 +109,16 @@ export class Order extends BaseEntity {
   @Column({ type: 'bigint', default: 0 })
   grandTotal!: number;
 
+  /**
+   * Marketing-agent referral code captured at checkout (POS tender,
+   * storefront checkout, or mobile checkout). Stored uppercase. When the
+   * order reaches PAID, the AgentsService uses this to credit the agent's
+   * wallet exactly once. NULL means no agent attribution.
+   */
+  @Index()
+  @Column({ type: 'varchar', length: 16, nullable: true })
+  agentCode?: string | null;
+
   // ── Payment ──
   @Column({ type: 'enum', enum: PaymentMethod, nullable: true })
   paymentMethod?: PaymentMethod;

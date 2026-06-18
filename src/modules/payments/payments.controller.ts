@@ -29,6 +29,7 @@ import {
 import { Order } from '../orders/entities/order.entity';
 import { Terminal } from '../branches/entities/terminal.entity';
 import { RefundsService } from '../refunds/refunds.service';
+import { AgentsService } from '../agents/agents.service';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { Public } from '../../shared/decorators/public.decorator';
 import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
@@ -86,6 +87,9 @@ export class PaymentsController {
     @Optional()
     @Inject(forwardRef(() => RefundsService))
     private readonly refundsService?: RefundsService,
+    @Optional()
+    @Inject(forwardRef(() => AgentsService))
+    private readonly agentsService?: AgentsService,
   ) {}
 
   // ── Admin: payment records ──
@@ -341,20 +345,36 @@ export class PaymentsController {
         return { received: true };
       }
 
-      // ── Transfer settlement (Paystack transfer refunds) ──
+      // ── Transfer settlement (Paystack transfers — refunds + agent payouts) ──
       if (eventName.startsWith('transfer.')) {
         const transferCode = data['transfer_code'] as string | undefined;
         const ref = data['reference'] as string | undefined;
         const identifier = transferCode ?? ref ?? null;
-        if (identifier && this.refundsService) {
-          const outcome =
-            eventName === 'transfer.success' ? 'SUCCEEDED' : 'FAILED';
-          await this.refundsService.settleByProviderReference(
-            identifier,
-            outcome,
-            event as unknown as Record<string, unknown>,
-            (data['message'] as string) ?? undefined,
-          );
+        const outcome =
+          eventName === 'transfer.success' ? 'SUCCEEDED' : 'FAILED';
+        const raw = event as unknown as Record<string, unknown>;
+        const failureReason = (data['message'] as string) ?? undefined;
+        if (identifier) {
+          // Try refunds first; if the reference isn't a refund-transfer
+          // row, try agent payouts. Each settlor returns null when the
+          // reference isn't theirs, so the second call is harmless.
+          let settled = null;
+          if (this.refundsService) {
+            settled = await this.refundsService.settleByProviderReference(
+              identifier,
+              outcome,
+              raw,
+              failureReason,
+            );
+          }
+          if (!settled && this.agentsService) {
+            await this.agentsService.settlePayout(
+              identifier,
+              outcome,
+              raw,
+              failureReason,
+            );
+          }
         }
         return { received: true };
       }

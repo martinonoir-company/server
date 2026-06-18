@@ -226,6 +226,9 @@ export class PosSyncService {
           discountAppliedBy: (tx.discountAmount || tx.couponCode) ? tx.staffId : undefined,
           discountAppliedByName: (tx.discountAmount || tx.couponCode) ? tx.staffName : undefined,
           discountAppliedAt: (tx.discountAmount || tx.couponCode) ? (tx.discountAppliedAt ? new Date(tx.discountAppliedAt) : new Date(tx.timestamp)) : undefined,
+          // Marketing-agent code captured at the till. The PAID hook in
+          // PaymentsService credits the agent's wallet exactly once.
+          agentCode: tx.agentCode?.trim().toUpperCase() || null,
           staffNote: `POS terminal: ${tx.terminalId} | Payment: ${paymentDetails}`,
           customerNote: tx.customerName
             ? `Customer: ${tx.customerName}${tx.customerPhone ? ` (${tx.customerPhone})` : ''}`
