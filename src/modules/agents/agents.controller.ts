@@ -26,6 +26,7 @@ import { User } from '../users/entities/user.entity';
 import { AgentsService } from './agents.service';
 import { AgentStatus } from './entities/marketing-agent.entity';
 import { AuthService } from '../auth/auth.service';
+import { PaystackProvider } from '../payments/providers/paystack.provider';
 
 // ── DTOs ──
 
@@ -48,6 +49,11 @@ class ValidateAgentCodeDto {
   @IsString() @Length(1, 16) code!: string;
 }
 
+class VerifyAgentBankAccountDto {
+  @IsString() @Matches(/^\d{10}$/) accountNumber!: string;
+  @IsString() @Matches(/^\d{2,10}$/) bankCode!: string;
+}
+
 class RejectAgentDto {
   @IsOptional() @IsString() reason?: string;
 }
@@ -66,6 +72,7 @@ export class AgentsController {
   constructor(
     private readonly agentsService: AgentsService,
     private readonly authService: AuthService,
+    private readonly paystack: PaystackProvider,
   ) {}
 
   // ─────────────────────────────────────────────────────────
@@ -129,6 +136,37 @@ export class AgentsController {
         },
       },
     };
+  }
+
+  /**
+   * Paystack bank list — needed by the agent signup form. Open so
+   * unauthenticated visitors filling out the signup wizard can pick a
+   * bank without first creating a customer account. The list itself
+   * isn't sensitive.
+   */
+  @Public()
+  @Get('banks')
+  async listBanks() {
+    const banks = await this.paystack.listBanks();
+    return { data: banks };
+  }
+
+  /**
+   * Resolve an agent's name from their bank account during signup. Same
+   * Paystack endpoint as /refunds/verify-bank-account but exposed
+   * publicly so the signup form works without auth.
+   */
+  @Public()
+  @Post('verify-bank-account')
+  async verifyBankAccount(@Body() dto: VerifyAgentBankAccountDto) {
+    const res = await this.paystack.resolveBankAccount({
+      accountNumber: dto.accountNumber,
+      bankCode: dto.bankCode,
+    });
+    if ('error' in res) {
+      return { data: { ok: false, error: res.error } };
+    }
+    return { data: { ok: true, accountName: res.accountName } };
   }
 
   /**
