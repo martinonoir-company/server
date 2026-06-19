@@ -80,22 +80,36 @@ export class MoniepointProvider implements IPaymentProvider {
   private readonly isLive: boolean;
 
   constructor() {
-    // Per the Moniepoint POS OpenAPI spec, the dashboard "API Key" IS the
-    // bearer token — there is no /oauth/token exchange. Requests are
-    // authenticated with `Authorization: Bearer <apiKey>`. The Client ID
-    // is informational; you do not send it on the wire.
-    this.apiKey = process.env['MONIEPOINT_API_KEY'] ?? '';
-    this.baseUrl =
-      process.env['MONIEPOINT_BASE_URL'] ?? 'https://api.pos.moniepoint.com';
+    // Per https://docs.pos.moniepoint.com/#tag/authentication, the API
+    // Key copied from the Moniepoint Business dashboard IS the bearer
+    // token. There is no /oauth/token round-trip and no client_id sent
+    // on the wire — the Client ID shown in the dashboard is the
+    // identifier of the key for your own bookkeeping, NOT a credential.
+    // Authentication = Authorization: Bearer <API Key>.
+    const raw = process.env['MONIEPOINT_API_KEY'] ?? '';
+    // Trim accidental whitespace from copy/paste. The key itself is
+    // ASCII-printable per Moniepoint's docs; surrounding spaces or
+    // quotes are the most common cause of "Invalid key provided.".
+    this.apiKey = raw.trim().replace(/^["']|["']$/g, '');
+    this.baseUrl = (
+      process.env['MONIEPOINT_BASE_URL'] ?? 'https://api.pos.moniepoint.com'
+    ).replace(/\/+$/, '');
     this.isLive = !!this.apiKey;
     if (!this.isLive) {
       this.logger.warn(
         'MONIEPOINT_API_KEY not set — running in stub mode',
       );
+    } else if (raw !== this.apiKey) {
+      this.logger.warn(
+        'MONIEPOINT_API_KEY had surrounding whitespace or quotes; trimmed before use.',
+      );
     }
   }
 
-  /** Authenticated fetch against the Moniepoint POS API. */
+  /**
+   * Authenticated fetch against the Moniepoint POS API. Static bearer —
+   * the dashboard "API Key" is the token verbatim.
+   */
   private async authedFetch(
     path: string,
     init: RequestInit,
@@ -107,6 +121,35 @@ export class MoniepointProvider implements IPaymentProvider {
         Authorization: `Bearer ${this.apiKey}`,
       },
     });
+  }
+
+  /**
+   * One-shot sanity check used by `scripts/check-moniepoint.mjs` and by
+   * the `POST /payments/admin/moniepoint/introspect` admin endpoint
+   * (added in a sibling commit). Hits GET /v1/introspect, the only
+   * Authentication-tagged endpoint, and returns the parsed body. A 200
+   * confirms the API Key is valid; a 401 means the key is wrong.
+   */
+  async introspect(): Promise<{
+    ok: boolean;
+    status: number;
+    body: Record<string, unknown>;
+  }> {
+    if (!this.isLive) {
+      return {
+        ok: false,
+        status: 0,
+        body: { error: 'MONIEPOINT_API_KEY not set (stub mode)' },
+      };
+    }
+    const res = await this.authedFetch('/v1/introspect', { method: 'GET' });
+    let body: Record<string, unknown>;
+    try {
+      body = (await res.json()) as Record<string, unknown>;
+    } catch {
+      body = { error: `Non-JSON response (${res.status})` };
+    }
+    return { ok: res.ok, status: res.status, body };
   }
 
   // ── POS terminal API ──

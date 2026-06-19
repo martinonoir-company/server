@@ -30,6 +30,7 @@ import { Order } from '../orders/entities/order.entity';
 import { Terminal } from '../branches/entities/terminal.entity';
 import { RefundsService } from '../refunds/refunds.service';
 import { AgentsService } from '../agents/agents.service';
+import { MoniepointProvider } from './providers/moniepoint.provider';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { Public } from '../../shared/decorators/public.decorator';
 import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
@@ -90,6 +91,7 @@ export class PaymentsController {
     @Optional()
     @Inject(forwardRef(() => AgentsService))
     private readonly agentsService?: AgentsService,
+    private readonly moniepoint?: MoniepointProvider,
   ) {}
 
   // ── Admin: payment records ──
@@ -480,5 +482,25 @@ export class PaymentsController {
       return { received: false };
     }
     return { received: true };
+  }
+
+  /**
+   * Diagnostic: introspect the configured Moniepoint API Key against
+   * GET /v1/introspect — the only Authentication-tagged endpoint on
+   * https://api.pos.moniepoint.com. A 200 confirms the key is good and
+   * shows which businesses + environment (SANDBOX / PROD) it scopes
+   * to; a 401 surfaces "Invalid key provided." straight from Moniepoint.
+   *
+   * Super-admin only. Useful after rotating the key so you don't have
+   * to attempt a real terminal push to know whether auth works.
+   */
+  @Post('admin/moniepoint/introspect')
+  @RequirePermissions(Permission.PAYMENTS_READ)
+  async moniepointIntrospect() {
+    if (!this.moniepoint) {
+      return { data: { ok: false, error: 'MoniepointProvider not wired.' } };
+    }
+    const res = await this.moniepoint.introspect();
+    return { data: res };
   }
 }
