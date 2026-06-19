@@ -34,6 +34,7 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
 import { PosSessionsModule } from './modules/pos-sessions/pos-sessions.module';
 import { RefundsModule } from './modules/refunds/refunds.module';
 import { AgentsModule } from './modules/agents/agents.module';
+import { AccountingModule } from './modules/accounting/accounting.module';
 
 @Module({
   imports: [
@@ -98,6 +99,7 @@ import { AgentsModule } from './modules/agents/agents.module';
     PosSessionsModule,
     RefundsModule,
     AgentsModule,
+    AccountingModule,
   ],
   controllers: [AppController],
   providers: [

@@ -87,6 +87,10 @@ export enum Permission {
   AGENTS_COMMISSION_SET = 'agents:commission_set',
   /** Capability for the agent's own session — never given to staff roles. */
   AGENT_SELF = 'agent:self',
+
+  // Accounting (super-admin-only module)
+  ACCOUNTING_VIEW = 'accounting:view',
+  ACCOUNTING_MANAGE = 'accounting:manage',
 }
 
 /**
