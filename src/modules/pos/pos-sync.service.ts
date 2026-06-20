@@ -19,6 +19,11 @@ import {
   PaymentMethodType,
   PaymentStatus,
 } from '../payments/entities/payment.entity';
+import { CouponsService } from '../coupons/coupons.service';
+import {
+  CouponChannel,
+  DiscountType,
+} from '../coupons/entities/coupon.entity';
 
 /** Map a POS payment-split method onto the payments-ledger taxonomy. */
 const SPLIT_TO_PAYMENT: Record<
@@ -55,6 +60,7 @@ export class PosSyncService {
     @InjectRepository(Product) private readonly productRepo: Repository<Product>,
     @InjectRepository(PosSyncJob) private readonly syncJobRepo: Repository<PosSyncJob>,
     private readonly paymentsService: PaymentsService,
+    private readonly couponsService: CouponsService,
   ) {}
 
   /**
@@ -177,8 +183,49 @@ export class PosSyncService {
       });
     }
 
-    // 3. Calculate discount
-    const discountTotal = tx.discountAmount ?? 0;
+    // 3a. Auto-apply variant-scoped coupons. Centralised math via
+    // CouponsService so the figure here matches what the
+    // storefront/mobile/POS-quote engines produce.
+    //
+    // Auto-apply does NOT stack on top of a cashier-applied manual
+    // discount or typed-code discount (tx.discountAmount > 0) — the
+    // cashier already made a manual decision and we don't want to
+    // silently increase that. When tx.discountAmount > 0 we honour
+    // the client-side figure verbatim. When it's 0, we look up
+    // auto-apply rescue coupons.
+    let autoDiscountTotal = 0;
+    let autoCouponCode: string | undefined;
+    if (!tx.discountAmount && !tx.couponCode) {
+      try {
+        const resolved = await this.couponsService.resolveAutoApplyForLines(
+          orderItems.map((i) => ({
+            variantId: i.variantId!,
+            lineSubtotal: i.lineTotal!,
+          })),
+          currency,
+          CouponChannel.POS,
+        );
+        if (resolved && resolved.totalDiscount > 0) {
+          for (const item of orderItems) {
+            const d = resolved.perLine.get(item.variantId!) ?? 0;
+            if (d > 0) {
+              item.discountAmount = d;
+              item.lineTotal = (item.lineTotal ?? 0) - d;
+            }
+          }
+          autoDiscountTotal = resolved.totalDiscount;
+          autoCouponCode = resolved.coupon.code;
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Auto-apply lookup failed at POS sync: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // 3b. Total discount = cashier-side discount (manual or typed code)
+    //                    + auto-apply discount.
+    const discountTotal = (tx.discountAmount ?? 0) + autoDiscountTotal;
     const grandTotal = Math.max(0, subtotal - discountTotal);
 
     // 4. Determine primary payment method (largest amount in split)
@@ -221,11 +268,29 @@ export class PosSyncService {
           paymentMethod,
           paidAt: hasCardLeg ? undefined : new Date(tx.timestamp),
           idempotencyKey: `pos-${tx.transactionId}`,
-          couponCode: tx.couponCode,
-          discountType: tx.discountType || (tx.couponCode ? 'COUPON' : tx.discountAmount ? 'MANUAL' : undefined),
-          discountAppliedBy: (tx.discountAmount || tx.couponCode) ? tx.staffId : undefined,
-          discountAppliedByName: (tx.discountAmount || tx.couponCode) ? tx.staffName : undefined,
-          discountAppliedAt: (tx.discountAmount || tx.couponCode) ? (tx.discountAppliedAt ? new Date(tx.discountAppliedAt) : new Date(tx.timestamp)) : undefined,
+          // When the cashier typed/applied a discount, those fields
+          // take precedence on the order row. When auto-apply fired
+          // (no cashier discount), we record the auto-apply code
+          // with 'AUTO' as the appliedBy marker so reports can
+          // identify rescue-discount sales separately from cashier-
+          // discounted ones.
+          couponCode: tx.couponCode ?? autoCouponCode,
+          discountType: autoCouponCode
+            ? DiscountType.PERCENTAGE
+            : tx.discountType ||
+              (tx.couponCode ? 'COUPON' : tx.discountAmount ? 'MANUAL' : undefined),
+          discountAppliedBy: autoCouponCode
+            ? 'AUTO'
+            : (tx.discountAmount || tx.couponCode) ? tx.staffId : undefined,
+          discountAppliedByName: autoCouponCode
+            ? 'Auto-applied promotion'
+            : (tx.discountAmount || tx.couponCode) ? tx.staffName : undefined,
+          discountAppliedAt:
+            autoCouponCode || tx.discountAmount || tx.couponCode
+              ? tx.discountAppliedAt
+                ? new Date(tx.discountAppliedAt)
+                : new Date(tx.timestamp)
+              : undefined,
           // Marketing-agent code captured at the till. The PAID hook in
           // PaymentsService credits the agent's wallet exactly once.
           agentCode: tx.agentCode?.trim().toUpperCase() || null,

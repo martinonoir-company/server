@@ -140,63 +140,35 @@ export class PricingEngine {
       return sum;
     }, 0);
 
-    // 4a. Auto-apply variant-scoped coupons.
-    //
-    // These fire silently — the customer never types a code. We look up
-    // every coupon that:
-    //   - autoApply = true
-    //   - covers at least one of the cart's variants
-    //   - is otherwise valid (status / currency / channel / dates)
-    // and pick the one that produces the deepest TOTAL discount across
-    // the matching lines. Discount is computed PER LINE so we never
-    // affect a non-qualifying item.
-    //
-    // The discount is recorded on `line.lineDiscount` per line; the
-    // running discountTotal sums those. A typed-code coupon (step 4b)
-    // then runs against the subtotal NET of auto-apply — so an admin
-    // can't accidentally stack a 20% percentage coupon on top of an
-    // already-discounted line. PER-LINE rounding: each line discount
-    // is rounded HALF-DOWN (Math.floor) so we never give back more
-    // than the math says — the customer is never overcredited.
+    // 4a. Auto-apply variant-scoped coupons (silent — customer never
+    // types a code). Math centralised in CouponsService.resolveAutoApply
+    // so PricingEngine, OrdersService.checkout and PosSyncService all
+    // produce identical figures.
     let discountTotal = 0;
     let autoAppliedCode: string | undefined;
     let autoAppliedType: DiscountType | undefined;
     let autoAppliedDiscountAmount = 0;
     try {
-      const candidates = await this.couponsService.findAutoApplyCandidates(
-        items.map((i) => i.variantId),
+      const resolved = await this.couponsService.resolveAutoApplyForLines(
+        lines.map((l) => ({
+          variantId: l.variantId,
+          lineSubtotal: l.lineSubtotal - l.lineDiscount,
+        })),
         currency,
         context.channel,
       );
-      let bestTotal = 0;
-      let bestPerLine: Map<string, number> | null = null;
-      let bestCoupon: typeof candidates[number] | null = null;
-      for (const c of candidates) {
-        // Final validity check (status + window + usage) — the SQL
-        // filter already covers status + window, but isValid also
-        // checks usageLimit.
-        if (!c.isValid) continue;
-        const perLine = this.computeAutoApplyDiscountPerLine(lines, c);
-        const total = Array.from(perLine.values()).reduce((s, n) => s + n, 0);
-        if (total > bestTotal) {
-          bestTotal = total;
-          bestPerLine = perLine;
-          bestCoupon = c;
-        }
-      }
-      if (bestCoupon && bestPerLine && bestTotal > 0) {
-        // Stamp lineDiscount in place.
+      if (resolved && resolved.totalDiscount > 0) {
         for (const line of lines) {
-          const d = bestPerLine.get(line.variantId) ?? 0;
+          const d = resolved.perLine.get(line.variantId) ?? 0;
           if (d > 0) {
             line.lineDiscount += d;
             line.lineTotal = line.lineSubtotal - line.lineDiscount;
           }
         }
-        discountTotal += bestTotal;
-        autoAppliedCode = bestCoupon.code;
-        autoAppliedType = bestCoupon.discountType;
-        autoAppliedDiscountAmount = bestTotal;
+        discountTotal += resolved.totalDiscount;
+        autoAppliedCode = resolved.coupon.code;
+        autoAppliedType = resolved.coupon.discountType;
+        autoAppliedDiscountAmount = resolved.totalDiscount;
       }
     } catch {
       // Auto-apply failures must never break the quote. Cart still
@@ -292,129 +264,4 @@ export class PricingEngine {
     };
   }
 
-  /**
-   * Compute how an auto-apply coupon distributes across the cart lines.
-   * Returns a map of variantId → discount (minor units), summing to the
-   * total discount the coupon would credit.
-   *
-   * Rules:
-   *   - Only lines whose variantId is in coupon.applicableVariantIds get
-   *     touched. Lines without coverage contribute zero.
-   *   - PERCENTAGE coupons: lineDiscount = floor(lineSubtotal * pct / 100).
-   *     Math.floor (never round up) so the customer is never given more
-   *     than the rate dictates. maximumDiscount caps the TOTAL across
-   *     all covered lines (not per-line) — applied proportionally so
-   *     the cap doesn't distort the split.
-   *   - FIXED_AMOUNT coupons: distribute the fixed value across covered
-   *     lines proportionally to their subtotal, rounded HALF-DOWN per
-   *     line, with any rounding-residual going to the largest line so
-   *     the per-line sum exactly equals the fixed value (no money
-   *     leaks).
-   *   - FREE_SHIPPING coupons: not handled here — that's a shipping-
-   *     level discount, applied in the shipping step.
-   *   - minimumOrderAmount: enforced against the SUM of covered lines.
-   *     If the covered subtotal doesn't reach the minimum, the coupon
-   *     produces 0 (and the engine moves on to the next candidate).
-   *   - Currency: PERCENTAGE works for any currency; FIXED_AMOUNT only
-   *     applies if the coupon currency matches the cart currency.
-   *     The SQL filter already enforces this — defence in depth here.
-   */
-  private computeAutoApplyDiscountPerLine(
-    lines: QuoteLine[],
-    coupon: import('../coupons/entities/coupon.entity').Coupon,
-  ): Map<string, number> {
-    const out = new Map<string, number>();
-    const covered = lines.filter((l) =>
-      coupon.applicableVariantIds.includes(l.variantId),
-    );
-    if (covered.length === 0) return out;
-
-    // Covered subtotal — sum BEFORE this discount. We don't double
-    // discount, so any pre-existing lineDiscount is excluded from the
-    // basis. (As of today this is auto-apply running first, so
-    // lineDiscount is 0 on entry — but the math still defends in case
-    // ordering changes.)
-    const coveredSubtotal = covered.reduce(
-      (s, l) => s + l.lineSubtotal - l.lineDiscount,
-      0,
-    );
-    if (coveredSubtotal <= 0) return out;
-
-    // Minimum-order check against covered lines, not the whole cart.
-    // A 5000 min on a "Black Crossbody" coupon shouldn't unlock just
-    // because the customer also has a 60000 wallet in the cart.
-    if (
-      coupon.minimumOrderAmount > 0 &&
-      coveredSubtotal < Number(coupon.minimumOrderAmount)
-    ) {
-      return out;
-    }
-
-    if (coupon.discountType === DiscountType.PERCENTAGE) {
-      const pct = Number(coupon.discountValue);
-      // Per-line discount = floor(lineSubtotal * pct / 100)
-      let totalDiscount = 0;
-      for (const line of covered) {
-        const basis = line.lineSubtotal - line.lineDiscount;
-        const d = Math.floor((basis * pct) / 100);
-        if (d > 0) {
-          out.set(line.variantId, d);
-          totalDiscount += d;
-        }
-      }
-      // Maximum-cap on percentage coupons. Apply pro-rata so the line
-      // shares stay proportional.
-      const cap = Number(coupon.maximumDiscount);
-      if (cap > 0 && totalDiscount > cap) {
-        const ratio = cap / totalDiscount;
-        let runningSum = 0;
-        let largestId: string | null = null;
-        let largest = 0;
-        for (const line of covered) {
-          const before = out.get(line.variantId) ?? 0;
-          const scaled = Math.floor(before * ratio);
-          out.set(line.variantId, scaled);
-          runningSum += scaled;
-          if (scaled > largest) {
-            largest = scaled;
-            largestId = line.variantId;
-          }
-        }
-        // Rounding residual goes to the largest line so the per-line
-        // sum exactly equals the cap.
-        const residual = cap - runningSum;
-        if (residual > 0 && largestId) {
-          out.set(largestId, (out.get(largestId) ?? 0) + residual);
-        }
-      }
-      return out;
-    }
-
-    if (coupon.discountType === DiscountType.FIXED_AMOUNT) {
-      const fixed = Math.min(Number(coupon.discountValue), coveredSubtotal);
-      if (fixed <= 0) return out;
-      // Pro-rata across covered lines.
-      let runningSum = 0;
-      let largestId: string | null = null;
-      let largest = 0;
-      for (const line of covered) {
-        const basis = line.lineSubtotal - line.lineDiscount;
-        const share = Math.floor((fixed * basis) / coveredSubtotal);
-        out.set(line.variantId, share);
-        runningSum += share;
-        if (basis > largest) {
-          largest = basis;
-          largestId = line.variantId;
-        }
-      }
-      const residual = fixed - runningSum;
-      if (residual > 0 && largestId) {
-        out.set(largestId, (out.get(largestId) ?? 0) + residual);
-      }
-      return out;
-    }
-
-    // FREE_SHIPPING — not a line discount.
-    return out;
-  }
 }

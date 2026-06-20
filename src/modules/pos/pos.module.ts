@@ -7,6 +7,7 @@ import { PosSyncWorkerService } from './pos-sync-worker.service';
 import { PosSyncJob } from './entities/pos-sync-job.entity';
 import { InventoryModule } from '../inventory/inventory.module';
 import { PaymentsModule } from '../payments/payments.module';
+import { CouponsModule } from '../coupons/coupons.module';
 import { Order, OrderItem, OrderStatusHistory } from '../orders/entities/order.entity';
 import { ProductVariant, Product } from '../products/entities/product.entity';
 import { Coupon } from '../coupons/entities/coupon.entity';
@@ -26,6 +27,7 @@ import { StockLevel } from '../inventory/entities/inventory.entity';
     ]),
     InventoryModule,
     PaymentsModule,
+    CouponsModule,
   ],
   controllers: [PosSyncController, PosPagesController],
   providers: [PosSyncService, PosSyncWorkerService, CustomersService],

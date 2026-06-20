@@ -135,58 +135,41 @@ export class OrdersService {
 
       // 2b. Auto-apply variant-scoped coupons.
       //
-      // The pricing engine handles this for quote previews; here we
-      // need the same math at commit time so the discount is actually
-      // persisted on the order. We re-use computeAutoApplyDiscount
-      // (same code path as the engine) so quotes and commits cannot
-      // diverge. Auto-apply is OPTIONAL — failure of any kind falls
+      // Math is centralised in CouponsService.resolveAutoApplyForLines
+      // so PricingEngine (quote previews), OrdersService.checkout, and
+      // PosSyncService.processTransaction all produce identical
+      // figures. Auto-apply is OPTIONAL — failure of any kind falls
       // back to full price.
       let autoDiscountTotal = 0;
       let autoCouponCode: string | undefined;
       try {
-        const variantIds = orderItems.map((i) => i.variantId!);
-        if (variantIds.length > 0) {
+        if (orderItems.length > 0) {
           const couponChannel =
             channel === OrderChannel.STOREFRONT
               ? CouponChannel.STOREFRONT
               : channel === OrderChannel.POS
                 ? CouponChannel.POS
                 : CouponChannel.MOBILE;
-          const candidates =
-            await this.couponsService.findAutoApplyCandidates(
-              variantIds,
+          const resolved =
+            await this.couponsService.resolveAutoApplyForLines(
+              orderItems.map((i) => ({
+                variantId: i.variantId!,
+                lineSubtotal: i.lineTotal!,
+              })),
               currency,
               couponChannel,
             );
-          let best = { total: 0, perLine: new Map<string, number>(), code: '' };
-          for (const c of candidates) {
-            if (!c.isValid) continue;
-            const perLine = this.computeAutoApplyPerLineForCheckout(
-              orderItems as {
-                variantId: string;
-                lineTotal: number;
-              }[],
-              c,
-            );
-            const total = Array.from(perLine.values()).reduce(
-              (s, n) => s + n,
-              0,
-            );
-            if (total > best.total) {
-              best = { total, perLine, code: c.code };
-            }
-          }
-          if (best.total > 0) {
+          if (resolved && resolved.totalDiscount > 0) {
             // Stamp lineDiscount on each OrderItem and reduce lineTotal.
             for (const item of orderItems) {
-              const d = best.perLine.get(item.variantId!) ?? 0;
+              const d = resolved.perLine.get(item.variantId!) ?? 0;
               if (d > 0) {
                 item.discountAmount = d;
                 item.lineTotal = (item.lineTotal ?? 0) - d;
               }
             }
-            autoDiscountTotal = best.total;
-            autoCouponCode = best.code;
+            autoDiscountTotal = resolved.totalDiscount;
+            autoCouponCode = resolved.coupon.code;
           }
         }
       } catch (err) {
@@ -759,97 +742,4 @@ export class OrdersService {
     return null;
   }
 
-  /**
-   * Mirrors PricingEngine.computeAutoApplyDiscountPerLine but works on
-   * the OrderItem-shape (variantId + lineTotal) the checkout uses. The
-   * two implementations are kept tight together so the quote a customer
-   * saw and the discount they're charged with cannot diverge.
-   *
-   * Returns variantId → discount (minor units).
-   */
-  private computeAutoApplyPerLineForCheckout(
-    lines: { variantId: string; lineTotal: number }[],
-    coupon: {
-      applicableVariantIds: string[];
-      discountType: DiscountType;
-      discountValue: number | string;
-      minimumOrderAmount: number | string;
-      maximumDiscount: number | string;
-    },
-  ): Map<string, number> {
-    const out = new Map<string, number>();
-    const covered = lines.filter((l) =>
-      coupon.applicableVariantIds.includes(l.variantId),
-    );
-    if (covered.length === 0) return out;
-    const coveredSubtotal = covered.reduce((s, l) => s + l.lineTotal, 0);
-    if (coveredSubtotal <= 0) return out;
-    if (
-      Number(coupon.minimumOrderAmount) > 0 &&
-      coveredSubtotal < Number(coupon.minimumOrderAmount)
-    ) {
-      return out;
-    }
-
-    if (coupon.discountType === DiscountType.PERCENTAGE) {
-      const pct = Number(coupon.discountValue);
-      let totalDiscount = 0;
-      for (const line of covered) {
-        const d = Math.floor((line.lineTotal * pct) / 100);
-        if (d > 0) {
-          out.set(line.variantId, d);
-          totalDiscount += d;
-        }
-      }
-      const cap = Number(coupon.maximumDiscount);
-      if (cap > 0 && totalDiscount > cap) {
-        const ratio = cap / totalDiscount;
-        let runningSum = 0;
-        let largestId: string | null = null;
-        let largest = 0;
-        for (const line of covered) {
-          const before = out.get(line.variantId) ?? 0;
-          const scaled = Math.floor(before * ratio);
-          out.set(line.variantId, scaled);
-          runningSum += scaled;
-          if (scaled > largest) {
-            largest = scaled;
-            largestId = line.variantId;
-          }
-        }
-        const residual = cap - runningSum;
-        if (residual > 0 && largestId) {
-          out.set(largestId, (out.get(largestId) ?? 0) + residual);
-        }
-      }
-      return out;
-    }
-
-    if (coupon.discountType === DiscountType.FIXED_AMOUNT) {
-      const fixed = Math.min(
-        Number(coupon.discountValue),
-        coveredSubtotal,
-      );
-      if (fixed <= 0) return out;
-      let runningSum = 0;
-      let largestId: string | null = null;
-      let largest = 0;
-      for (const line of covered) {
-        const share = Math.floor((fixed * line.lineTotal) / coveredSubtotal);
-        out.set(line.variantId, share);
-        runningSum += share;
-        if (line.lineTotal > largest) {
-          largest = line.lineTotal;
-          largestId = line.variantId;
-        }
-      }
-      const residual = fixed - runningSum;
-      if (residual > 0 && largestId) {
-        out.set(largestId, (out.get(largestId) ?? 0) + residual);
-      }
-      return out;
-    }
-
-    return out;
-  }
 }

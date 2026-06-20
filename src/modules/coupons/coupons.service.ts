@@ -174,6 +174,148 @@ export class CouponsService {
   }
 
   /**
+   * Pick the best auto-apply coupon for a set of cart lines and return
+   * the resolved per-line discount distribution. This is the single
+   * source-of-truth math reused by:
+   *   - PricingEngine (quote previews — storefront / mobile / POS)
+   *   - OrdersService.checkout (storefront / mobile commit)
+   *   - PosSyncService.processTransaction (POS commit)
+   *
+   * Returns null when no auto-apply coupon covers any line. Caller
+   * applies the per-line discounts to OrderItem.discountAmount and the
+   * total to order.discountTotal.
+   */
+  async resolveAutoApplyForLines(
+    lines: { variantId: string; lineSubtotal: number }[],
+    currency: string,
+    channel?: CouponChannel,
+  ): Promise<{
+    coupon: Coupon;
+    perLine: Map<string, number>;
+    totalDiscount: number;
+  } | null> {
+    const variantIds = lines.map((l) => l.variantId);
+    const candidates = await this.findAutoApplyCandidates(
+      variantIds,
+      currency,
+      channel,
+    );
+    if (candidates.length === 0) return null;
+    let best: {
+      coupon: Coupon;
+      perLine: Map<string, number>;
+      totalDiscount: number;
+    } | null = null;
+    for (const c of candidates) {
+      if (!c.isValid) continue;
+      const perLine = this.computeAutoApplyPerLine(lines, c);
+      const totalDiscount = Array.from(perLine.values()).reduce(
+        (s, n) => s + n,
+        0,
+      );
+      if (totalDiscount > (best?.totalDiscount ?? 0)) {
+        best = { coupon: c, perLine, totalDiscount };
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Per-line discount math for an auto-apply coupon. Kept identical to
+   * the PricingEngine and OrdersService implementations — see those
+   * files for the comment trail on rounding and cap semantics.
+   *
+   * Caller passes a list of lines with their CURRENT subtotal (the
+   * basis we discount against). lineSubtotal must NOT already include
+   * any previous discount; if you've stacked an earlier auto-apply,
+   * pass the residual.
+   */
+  computeAutoApplyPerLine(
+    lines: { variantId: string; lineSubtotal: number }[],
+    coupon: Coupon,
+  ): Map<string, number> {
+    const out = new Map<string, number>();
+    const covered = lines.filter((l) =>
+      coupon.applicableVariantIds.includes(l.variantId),
+    );
+    if (covered.length === 0) return out;
+    const coveredSubtotal = covered.reduce(
+      (s, l) => s + l.lineSubtotal,
+      0,
+    );
+    if (coveredSubtotal <= 0) return out;
+    if (
+      Number(coupon.minimumOrderAmount) > 0 &&
+      coveredSubtotal < Number(coupon.minimumOrderAmount)
+    ) {
+      return out;
+    }
+
+    if (coupon.discountType === DiscountType.PERCENTAGE) {
+      const pct = Number(coupon.discountValue);
+      let totalDiscount = 0;
+      for (const line of covered) {
+        const d = Math.floor((line.lineSubtotal * pct) / 100);
+        if (d > 0) {
+          out.set(line.variantId, d);
+          totalDiscount += d;
+        }
+      }
+      const cap = Number(coupon.maximumDiscount);
+      if (cap > 0 && totalDiscount > cap) {
+        const ratio = cap / totalDiscount;
+        let runningSum = 0;
+        let largestId: string | null = null;
+        let largest = 0;
+        for (const line of covered) {
+          const before = out.get(line.variantId) ?? 0;
+          const scaled = Math.floor(before * ratio);
+          out.set(line.variantId, scaled);
+          runningSum += scaled;
+          if (scaled > largest) {
+            largest = scaled;
+            largestId = line.variantId;
+          }
+        }
+        const residual = cap - runningSum;
+        if (residual > 0 && largestId) {
+          out.set(largestId, (out.get(largestId) ?? 0) + residual);
+        }
+      }
+      return out;
+    }
+
+    if (coupon.discountType === DiscountType.FIXED_AMOUNT) {
+      const fixed = Math.min(
+        Number(coupon.discountValue),
+        coveredSubtotal,
+      );
+      if (fixed <= 0) return out;
+      let runningSum = 0;
+      let largestId: string | null = null;
+      let largest = 0;
+      for (const line of covered) {
+        const share = Math.floor(
+          (fixed * line.lineSubtotal) / coveredSubtotal,
+        );
+        out.set(line.variantId, share);
+        runningSum += share;
+        if (line.lineSubtotal > largest) {
+          largest = line.lineSubtotal;
+          largestId = line.variantId;
+        }
+      }
+      const residual = fixed - runningSum;
+      if (residual > 0 && largestId) {
+        out.set(largestId, (out.get(largestId) ?? 0) + residual);
+      }
+      return out;
+    }
+
+    return out;
+  }
+
+  /**
    * Increment usage count after successful order.
    */
   async recordUsage(code: string): Promise<void> {
