@@ -213,8 +213,15 @@ export class AccountingService {
       .from('order_items', 'oi')
       .innerJoin('orders', 'o', 'o.id = oi."orderId"')
       .innerJoin('product_variants', 'v', 'v.id = oi."variantId"')
+      // Gross profit per line:
+      //   (unitPrice × qty) − discountAmount − (cost × qty)
+      // discountAmount sits on OrderItem and is populated by the
+      // auto-apply pricing engine. Subtracting it here keeps gross
+      // profit honest when a variant-scoped promotion is active.
+      // GREATEST(...,0) is a defensive floor so a mis-tagged cost
+      // can't drive a line negative.
       .select(
-        `COALESCE(SUM(GREATEST(0, (oi."unitPrice" - COALESCE(v."costPriceNgn", 0)) * oi.quantity)), 0)::bigint`,
+        `COALESCE(SUM(GREATEST(0, (oi."unitPrice" * oi.quantity) - COALESCE(oi."discountAmount", 0) - COALESCE(v."costPriceNgn", 0) * oi.quantity)), 0)::bigint`,
         'profit',
       )
       .addSelect(
