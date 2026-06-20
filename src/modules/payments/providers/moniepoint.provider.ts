@@ -53,18 +53,39 @@ export interface TerminalStatusResult {
   raw?: Record<string, unknown>;
 }
 
-/** Moniepoint processingStatus -> our PaymentIntentStatus. */
+/**
+ * Moniepoint `processingStatus` → our PaymentIntentStatus.
+ *
+ * The Moniepoint state machine (from the POS OpenAPI spec) is:
+ *   PENDING     — request accepted by the queue, device has not yet
+ *                 acknowledged.
+ *   PROCESSED   — the device has finished interacting with the customer
+ *                 (card was tapped, PIN entered, receipt printed). From
+ *                 the merchant's point of view, the sale is DONE. Any
+ *                 further state changes are internal Moniepoint
+ *                 settlement and never reach PROCESSED→FAILED — failure
+ *                 is reported separately by the device as FAILED.
+ *   SUCCESSFUL  — internal Moniepoint reconciliation has confirmed it.
+ *   COMPLETED   — terminal state, fully settled.
+ *   FAILED      — the device or the network rejected the payment.
+ *   CANCELLED   — the cashier or customer cancelled on the device.
+ *
+ * Earlier we mapped PROCESSED → PROCESSING, which left the POS loop
+ * polling forever (and the customer staring at a "waiting for terminal"
+ * screen) for a transaction the device had already completed. PROCESSED
+ * is a terminal-success state for our purposes: the customer paid and
+ * left. We map it to SUCCEEDED so the order flips to PAID.
+ */
 function mapProcessingStatus(s: string | undefined): PaymentIntentStatus {
   switch (s) {
     case 'SUCCESSFUL':
     case 'COMPLETED':
+    case 'PROCESSED':
       return PaymentIntentStatus.SUCCEEDED;
     case 'FAILED':
       return PaymentIntentStatus.FAILED;
     case 'CANCELLED':
       return PaymentIntentStatus.CANCELLED;
-    case 'PROCESSED':
-      return PaymentIntentStatus.PROCESSING;
     case 'PENDING':
     default:
       return PaymentIntentStatus.PENDING;
@@ -255,6 +276,9 @@ export class MoniepointProvider implements IPaymentProvider {
 
       if (!res.ok) {
         // 404 = not found yet (terminal still processing) — treat as pending.
+        this.logger.warn(
+          `Moniepoint lookup ${res.status} for ${merchantReference}: ${JSON.stringify(data)}`,
+        );
         return {
           merchantReference,
           status: PaymentIntentStatus.PENDING,
@@ -264,22 +288,41 @@ export class MoniepointProvider implements IPaymentProvider {
         };
       }
 
+      // Log the raw provider verdict every time so it lands in the
+      // server log alongside the order. Critical for diagnosing "stuck
+      // PROCESSING" — without this we couldn't tell whether the
+      // terminal actually completed or our mapping was wrong.
+      this.logger.log(
+        `Moniepoint lookup ${merchantReference}: ` +
+          `processingStatus=${data['processingStatus']} ` +
+          `responseCode=${data['responseCode']} ` +
+          `actualAmount=${data['actualAmount']}`,
+      );
+
+      // The terminal-status response carries `requestAmount` as well —
+      // sometimes Moniepoint omits `actualAmount` until the transaction
+      // is finalised. Fall back to requestAmount so the verify path
+      // doesn't lose the amount.
+      const actualAmount =
+        typeof data['actualAmount'] === 'number'
+          ? (data['actualAmount'] as number)
+          : typeof data['requestAmount'] === 'number'
+            ? (data['requestAmount'] as number)
+            : undefined;
+
       return {
         merchantReference:
           (data['merchantReference'] as string) ?? merchantReference,
         transactionReference: data['transactionReference'] as string,
         status: mapProcessingStatus(data['processingStatus'] as string),
-        actualAmount:
-          typeof data['actualAmount'] === 'number'
-            ? (data['actualAmount'] as number)
-            : undefined,
+        actualAmount,
         responseCode: data['responseCode'] as string,
         responseMessage: data['responseMessage'] as string,
         raw: data,
       };
     } catch (err) {
       this.logger.error(
-        `Moniepoint lookup error: ${(err as Error).message}`,
+        `Moniepoint lookup error for ${merchantReference}: ${(err as Error).message}`,
       );
       // Transient error — pending, so the caller retries rather than failing.
       return { merchantReference, status: PaymentIntentStatus.PENDING };
