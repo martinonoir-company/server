@@ -35,6 +35,7 @@ import {
   AgentPayoutStatus,
 } from '../agents/entities/agent-payout.entity';
 import { MarketingAgent } from '../agents/entities/marketing-agent.entity';
+import { SALES_TAX_RATE } from '../products/tax.util';
 
 /** Shared shape: a single bucket on a series (day / week / month). */
 export interface SeriesPoint {
@@ -45,25 +46,59 @@ export interface SeriesPoint {
 }
 
 /**
- * Accounting roll-ups. Source of truth is the operational tables:
+ * Accounting roll-ups, rebased on NET-OF-TAX figures.
  *
- *   - Revenue  ← orders.grandTotal where status flips to PAID and beyond.
- *   - Gross profit ← (unitPrice − costPriceNgn) × qty over PAID order items
- *                    on a NGN currency. Mirrors the existing analytics
- *                    formula so the two pages cannot disagree.
- *   - Refunds  ← refund_requests.amount where status ∈ { SUCCEEDED,
- *                COMPLETED_BY_STAFF }.
- *   - Commissions earned ← agent_attributions.commissionMinor where
- *                          status = EARNED.
- *   - Payouts disbursed   ← agent_payouts.amountMinor where status
- *                            = SUCCEEDED.
- *   - Expenses ← expenses.amountMinor (manually entered).
+ * Pricing rule (see products/tax.util.ts): the catalog selling price is
+ * stored TAX-INCLUSIVE (entered price × 1.075). Every order, refund,
+ * and agent-attribution figure that flows from those prices is therefore
+ * gross of VAT. For regulatory reporting we want NET (post-VAT) numbers
+ * so net revenue, output VAT, net gross profit and net profit line up
+ * with what an FIRS filing expects.
  *
- * Net profit (the metric on the dashboard) =
- *   grossProfit − refunds − commissionsEarned − expenses
+ * The split rule, applied in one place (splitVat) and reused everywhere:
+ *   netMinor = round(grossMinor / (1 + SALES_TAX_RATE))
+ *   vatMinor = grossMinor − netMinor
+ * Rounding is to the nearest kobo and net+vat always reconciles to gross
+ * by construction (no banker's-rounding drift across totals).
  *
- * All money is bigint kobo throughout. The service NEVER converts to
- * naira; the UI does that.
+ * Source of truth per figure:
+ *   - Gross revenue   ← SUM(orders.grandTotal) on paid orders.
+ *   - Net revenue     ← splitVat(grossRevenue).net
+ *   - Output VAT      ← splitVat(grossRevenue).vat
+ *   - Refunds         ← SUM(refund_requests.amount) on settled refunds.
+ *                       Customer is refunded the GROSS amount they paid,
+ *                       so the VAT portion is also refunded — netRefunds
+ *                       and vatRefunds are derived the same way.
+ *   - Commissions     ← floor(orderTotal × bps / 10_000). The bps is
+ *                       applied to the gross order total at attribution
+ *                       time (snapshotted on agent_attributions.bps), so
+ *                       the commission line on the books is already
+ *                       fixed. For reporting we ALSO compute the share
+ *                       that arose from net vs. VAT — informational only,
+ *                       does not change what the agent is paid.
+ *   - Gross profit    ← (unitPrice − costPriceNgn) × qty, summed.
+ *                       unitPrice is tax-inclusive but costPriceNgn is
+ *                       NOT (see products/tax.util.ts), so this figure
+ *                       is overstated by the VAT in the selling price.
+ *                       The net gross profit deducts that VAT:
+ *                         netGrossProfit = grossProfit − vatOnRevenue
+ *                                        = (netRevenue − cogs)
+ *                       In effect we compare cost to NET selling price.
+ *   - Payouts disbursed ← SUM(agent_payouts.amountMinor) on SUCCEEDED.
+ *                          These pay out commissions that are already
+ *                          fixed; we do not split them.
+ *   - Expenses        ← SUM(expenses.amountMinor) — manually entered.
+ *                       Treated as VAT-exclusive (no input-VAT handling
+ *                       in MVP). Net = gross.
+ *
+ * Net profit (the dashboard headline) is computed once, from net inputs:
+ *   netProfit = netGrossProfit − netRefunds − commissionsEarned − expenses
+ *
+ * The Vat Roll-Up surface (vatReport()) returns output VAT (collected)
+ * minus refunded VAT (which leaves the business) for the window — the
+ * shape an FIRS filing needs.
+ *
+ * Money is bigint kobo throughout. The service NEVER converts to naira.
  */
 @Injectable()
 export class AccountingService {
@@ -92,6 +127,25 @@ export class AccountingService {
   // ─────────────────────────────────────────────────────────────
   // Date-window helpers
   // ─────────────────────────────────────────────────────────────
+
+  // ─────────────────────────────────────────────────────────────
+  // VAT split — the ONE place we extract VAT from a tax-inclusive
+  // figure. Reused by every report. Rounding policy: round-half-up to
+  // nearest kobo on the net portion, then derive VAT by subtraction so
+  // net + vat reconciles to the original gross exactly. There can be a
+  // ±1 kobo difference on a single row; aggregated SUMs use this same
+  // rule so the totals match the line items.
+  //
+  // Inverse of products/tax.util.ts:addSalesTax.
+  // ─────────────────────────────────────────────────────────────
+  private splitVat(grossMinor: number): { netMinor: number; vatMinor: number } {
+    if (!Number.isFinite(grossMinor) || grossMinor <= 0) {
+      return { netMinor: 0, vatMinor: 0 };
+    }
+    const netMinor = Math.round(grossMinor / (1 + SALES_TAX_RATE));
+    const vatMinor = grossMinor - netMinor;
+    return { netMinor, vatMinor };
+  }
 
   private toRange(
     from?: string | Date,
@@ -581,9 +635,40 @@ export class AccountingService {
     toInput?: string | Date,
   ): Promise<{
     range: { from: string; to: string };
-    revenueNgn: number;
-    grossProfit: { profitNgn: number; itemsCosted: number; itemsTotal: number };
-    refunds: { amountNgn: number; itemsCount: number; requestsCount: number };
+    /** Sales-tax rate the figures were split on (e.g. 0.075). */
+    salesTaxRate: number;
+    /** Tax-inclusive sales receipts. Equal to SUM(orders.grandTotal). */
+    grossRevenueNgn: number;
+    /** Revenue net of VAT — the figure that flows through the P&L. */
+    netRevenueNgn: number;
+    /** Output VAT collected = grossRevenueNgn − netRevenueNgn. */
+    vatOnRevenueNgn: number;
+    /**
+     * Gross-profit math. `grossProfitNgn` is the legacy figure
+     * (unitPrice − costPriceNgn) × qty — overstated by the VAT in the
+     * selling price. `netGrossProfitNgn` is the correct net figure
+     * (netRevenue − cogs) and is what the P&L uses.
+     */
+    grossProfit: {
+      grossProfitNgn: number;
+      netGrossProfitNgn: number;
+      cogsNgn: number;
+      itemsCosted: number;
+      itemsTotal: number;
+    };
+    /**
+     * Refunds split. `grossAmountNgn` is what the customer received back
+     * (matches the refund_requests.amount column); netAmountNgn is the
+     * revenue side reversal; vatAmountNgn is the VAT we must reclaim.
+     */
+    refunds: {
+      grossAmountNgn: number;
+      netAmountNgn: number;
+      vatAmountNgn: number;
+      itemsCount: number;
+      requestsCount: number;
+    };
+    /** Agent commissions are unchanged — they are a settled liability. */
     commissions: { amountNgn: number; ordersCount: number };
     payoutsDisbursed: { amountNgn: number; payoutsCount: number };
     expenses: {
@@ -595,13 +680,14 @@ export class AccountingService {
         count: number;
       }>;
     };
+    /** netGrossProfit − netRefunds − commissions − expenses */
     netProfitNgn: number;
   }> {
     const { from, to } = this.toRange(fromInput, toInput);
     const [
-      revenueNgn,
-      grossProfit,
-      refunds,
+      grossRevenueNgn,
+      grossProfitRaw,
+      refundsRaw,
       commissions,
       payoutsDisbursed,
       expenses,
@@ -613,19 +699,42 @@ export class AccountingService {
       this.payoutsDisbursedNgn(from, to),
       this.expensesTotalNgn(from, to),
     ]);
+
+    const revenueSplit = this.splitVat(grossRevenueNgn);
+    const refundsSplit = this.splitVat(refundsRaw.amountNgn);
+
+    // Net gross profit = grossProfit − VAT-on-revenue.
+    // Equivalently = netRevenue − cogs. cogs is derived so it stays
+    // exactly consistent: cogs = grossRevenue − grossProfit.
+    const cogsNgn = grossRevenueNgn - grossProfitRaw.profitNgn;
+    const netGrossProfitNgn = revenueSplit.netMinor - cogsNgn;
+
     const netProfitNgn =
-      grossProfit.profitNgn -
-      refunds.amountNgn -
+      netGrossProfitNgn -
+      refundsSplit.netMinor -
       commissions.amountNgn -
       expenses.amountNgn;
+
     return {
-      range: {
-        from: from.toISOString(),
-        to: to.toISOString(),
+      range: { from: from.toISOString(), to: to.toISOString() },
+      salesTaxRate: SALES_TAX_RATE,
+      grossRevenueNgn,
+      netRevenueNgn: revenueSplit.netMinor,
+      vatOnRevenueNgn: revenueSplit.vatMinor,
+      grossProfit: {
+        grossProfitNgn: grossProfitRaw.profitNgn,
+        netGrossProfitNgn,
+        cogsNgn,
+        itemsCosted: grossProfitRaw.itemsCosted,
+        itemsTotal: grossProfitRaw.itemsTotal,
       },
-      revenueNgn,
-      grossProfit,
-      refunds,
+      refunds: {
+        grossAmountNgn: refundsRaw.amountNgn,
+        netAmountNgn: refundsSplit.netMinor,
+        vatAmountNgn: refundsSplit.vatMinor,
+        itemsCount: refundsRaw.itemsCount,
+        requestsCount: refundsRaw.requestsCount,
+      },
       commissions,
       payoutsDisbursed,
       expenses,
@@ -751,6 +860,114 @@ export class AccountingService {
       entityType: 'report',
       payload: opts as unknown as Record<string, unknown>,
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // VAT report — what an FIRS filing needs
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * VAT roll-up for the window. Built from the same source data as the
+   * P&L, so a filing can be reconciled directly against revenue and
+   * refunds in the P&L.
+   *
+   *   outputVat   — VAT collected on sales (the 7.5% portion of revenue).
+   *   refundedVat — VAT given back to customers (the 7.5% portion of
+   *                 refunded amounts). These reduce VAT payable for the
+   *                 period.
+   *   inputVat    — VAT on expenses. The MVP tracks expenses as
+   *                 VAT-exclusive, so this is always 0. The shape is
+   *                 here so the column is wired when input VAT capture
+   *                 is added later.
+   *   netVatPayable = outputVat − refundedVat − inputVat
+   */
+  async vatReport(
+    fromInput?: string | Date,
+    toInput?: string | Date,
+  ): Promise<{
+    range: { from: string; to: string };
+    salesTaxRate: number;
+    revenue: {
+      grossNgn: number;
+      netNgn: number;
+      vatNgn: number;
+      ordersCount: number;
+    };
+    refunds: {
+      grossNgn: number;
+      netNgn: number;
+      vatNgn: number;
+      requestsCount: number;
+    };
+    inputVat: { amountNgn: number; expensesCount: number };
+    netVatPayableNgn: number;
+  }> {
+    const { from, to } = this.toRange(fromInput, toInput);
+
+    // Revenue side — same statuses + same paidAt window as
+    // revenueTotalNgn so the two reports cannot disagree.
+    const revRow = await this.orderRepo
+      .createQueryBuilder('o')
+      .select(`COALESCE(SUM(o."grandTotal"), 0)::bigint`, 'gross')
+      .addSelect(`COUNT(*)::int`, 'orders')
+      .where(`o.currency = :ngn`, { ngn: 'NGN' })
+      .andWhere(`o.status IN (:...statuses)`, {
+        statuses: [
+          OrderStatus.PAID,
+          OrderStatus.PROCESSING,
+          OrderStatus.SHIPPED,
+          OrderStatus.DELIVERED,
+          OrderStatus.RETURN_REQUESTED,
+          OrderStatus.RETURN_APPROVED,
+          OrderStatus.RETURNED,
+          OrderStatus.REFUNDED,
+        ],
+      })
+      .andWhere(`o."paidAt" BETWEEN :from AND :to`, { from, to })
+      .getRawOne<{ gross: string; orders: string }>();
+    const grossRev = Number(revRow?.gross ?? 0);
+    const revSplit = this.splitVat(grossRev);
+
+    // Refund side.
+    const refRow = await this.refundRepo
+      .createQueryBuilder('r')
+      .select(`COALESCE(SUM(r.amount), 0)::bigint`, 'gross')
+      .addSelect(`COUNT(*)::int`, 'reqs')
+      .where(`r.status IN (:...statuses)`, {
+        statuses: [RefundStatus.SUCCEEDED, RefundStatus.COMPLETED_BY_STAFF],
+      })
+      .andWhere(`r.currency = :ngn`, { ngn: 'NGN' })
+      .andWhere(`r."createdAt" BETWEEN :from AND :to`, { from, to })
+      .getRawOne<{ gross: string; reqs: string }>();
+    const grossRef = Number(refRow?.gross ?? 0);
+    const refSplit = this.splitVat(grossRef);
+
+    // Input VAT — not captured today. Wired as zero so the shape is
+    // stable; when expenses gain a VAT column the read swaps in here.
+    const inputVatAmount = 0;
+    const inputExpensesCount = 0;
+
+    const netVatPayableNgn =
+      revSplit.vatMinor - refSplit.vatMinor - inputVatAmount;
+
+    return {
+      range: { from: from.toISOString(), to: to.toISOString() },
+      salesTaxRate: SALES_TAX_RATE,
+      revenue: {
+        grossNgn: grossRev,
+        netNgn: revSplit.netMinor,
+        vatNgn: revSplit.vatMinor,
+        ordersCount: Number(revRow?.orders ?? 0),
+      },
+      refunds: {
+        grossNgn: grossRef,
+        netNgn: refSplit.netMinor,
+        vatNgn: refSplit.vatMinor,
+        requestsCount: Number(refRow?.reqs ?? 0),
+      },
+      inputVat: { amountNgn: inputVatAmount, expensesCount: inputExpensesCount },
+      netVatPayableNgn,
+    };
   }
 
   // ─────────────────────────────────────────────────────────────

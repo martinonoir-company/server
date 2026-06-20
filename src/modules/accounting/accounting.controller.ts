@@ -91,6 +91,16 @@ export class AccountingController {
     return { data: await this.accountingService.pnl(q.from, q.to) };
   }
 
+  /**
+   * VAT roll-up — what an FIRS filing needs. Output VAT, refunded VAT,
+   * input VAT (zero for now), and the net VAT payable.
+   */
+  @Get('vat-report')
+  @RequirePermissions(Permission.ACCOUNTING_VIEW)
+  async vatReport(@Query() q: DateRangeQueryDto) {
+    return { data: await this.accountingService.vatReport(q.from, q.to) };
+  }
+
   /** Exporting marks an audit log entry but otherwise returns the same P&L. */
   @Post('pnl/export')
   @HttpCode(200)
