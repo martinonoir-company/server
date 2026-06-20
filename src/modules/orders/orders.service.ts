@@ -13,6 +13,11 @@ import { Product } from '../products/entities/product.entity';
 import { InventoryService } from '../inventory/inventory.service';
 import { MovementKind } from '../inventory/entities/inventory.entity';
 import { CartService } from '../cart/cart.service';
+import { CouponsService } from '../coupons/coupons.service';
+import {
+  CouponChannel,
+  DiscountType,
+} from '../coupons/entities/coupon.entity';
 import { EmailService } from '../notifications/email.service';
 import { PushService } from '../notifications/push.service';
 import { User } from '../users/entities/user.entity';
@@ -38,6 +43,7 @@ export class OrdersService {
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly inventoryService: InventoryService,
     private readonly cartService: CartService,
+    private readonly couponsService: CouponsService,
     private readonly emailService: EmailService,
     private readonly pushService: PushService,
     private readonly dataSource: DataSource,
@@ -127,6 +133,72 @@ export class OrdersService {
         });
       }
 
+      // 2b. Auto-apply variant-scoped coupons.
+      //
+      // The pricing engine handles this for quote previews; here we
+      // need the same math at commit time so the discount is actually
+      // persisted on the order. We re-use computeAutoApplyDiscount
+      // (same code path as the engine) so quotes and commits cannot
+      // diverge. Auto-apply is OPTIONAL — failure of any kind falls
+      // back to full price.
+      let autoDiscountTotal = 0;
+      let autoCouponCode: string | undefined;
+      try {
+        const variantIds = orderItems.map((i) => i.variantId!);
+        if (variantIds.length > 0) {
+          const couponChannel =
+            channel === OrderChannel.STOREFRONT
+              ? CouponChannel.STOREFRONT
+              : channel === OrderChannel.POS
+                ? CouponChannel.POS
+                : CouponChannel.MOBILE;
+          const candidates =
+            await this.couponsService.findAutoApplyCandidates(
+              variantIds,
+              currency,
+              couponChannel,
+            );
+          let best = { total: 0, perLine: new Map<string, number>(), code: '' };
+          for (const c of candidates) {
+            if (!c.isValid) continue;
+            const perLine = this.computeAutoApplyPerLineForCheckout(
+              orderItems as {
+                variantId: string;
+                lineTotal: number;
+              }[],
+              c,
+            );
+            const total = Array.from(perLine.values()).reduce(
+              (s, n) => s + n,
+              0,
+            );
+            if (total > best.total) {
+              best = { total, perLine, code: c.code };
+            }
+          }
+          if (best.total > 0) {
+            // Stamp lineDiscount on each OrderItem and reduce lineTotal.
+            for (const item of orderItems) {
+              const d = best.perLine.get(item.variantId!) ?? 0;
+              if (d > 0) {
+                item.discountAmount = d;
+                item.lineTotal = (item.lineTotal ?? 0) - d;
+              }
+            }
+            autoDiscountTotal = best.total;
+            autoCouponCode = best.code;
+          }
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Auto-apply lookup failed at checkout: ${(err as Error).message}`,
+        );
+      }
+
+      const finalSubtotal = subtotal;
+      const finalDiscountTotal = autoDiscountTotal;
+      const finalGrandTotal = finalSubtotal - finalDiscountTotal;
+
       // 3. Create order. The order number is computed from the database
       //    inside this transaction; withUniqueOrderNumber retries with a
       //    fresh number if a concurrent checkout grabs the same sequence.
@@ -140,15 +212,31 @@ export class OrdersService {
           status: initialStatus,
           channel,
           currency,
-          subtotal,
-          discountTotal: 0,
+          subtotal: finalSubtotal,
+          discountTotal: finalDiscountTotal,
           shippingTotal: 0,
           taxTotal: 0,
-          grandTotal: subtotal,
+          grandTotal: finalGrandTotal,
           paymentMethod: dto.paymentMethod,
           paidAt: isPOS ? new Date() : undefined,
           shippingAddress: dto.shippingAddress,
-          couponCode: dto.couponCode,
+          // Auto-applied variant promotion wins precedence in audit
+          // trail. If the customer also supplied a typed code, we
+          // record the typed code preferentially since today's
+          // checkout doesn't yet apply typed-code discounts on commit
+          // (only the quote engine does). Either way, when the
+          // discountTotal > 0, couponCode + discountType identify
+          // which coupon produced the credit.
+          couponCode: dto.couponCode ?? autoCouponCode ?? undefined,
+          discountType: autoCouponCode
+            ? DiscountType.PERCENTAGE // auto-apply records the rule type
+            : undefined,
+          discountAppliedBy: autoCouponCode ? 'AUTO' : undefined,
+          discountAppliedByName: autoCouponCode
+            ? 'Auto-applied promotion'
+            : undefined,
+          discountAppliedAt:
+            autoDiscountTotal > 0 ? new Date() : undefined,
           customerNote: dto.customerNote,
           idempotencyKey: dto.idempotencyKey,
           // Uppercased agent code captured at checkout (storefront /
@@ -669,5 +757,99 @@ export class OrdersService {
       return user?.email ?? null;
     }
     return null;
+  }
+
+  /**
+   * Mirrors PricingEngine.computeAutoApplyDiscountPerLine but works on
+   * the OrderItem-shape (variantId + lineTotal) the checkout uses. The
+   * two implementations are kept tight together so the quote a customer
+   * saw and the discount they're charged with cannot diverge.
+   *
+   * Returns variantId → discount (minor units).
+   */
+  private computeAutoApplyPerLineForCheckout(
+    lines: { variantId: string; lineTotal: number }[],
+    coupon: {
+      applicableVariantIds: string[];
+      discountType: DiscountType;
+      discountValue: number | string;
+      minimumOrderAmount: number | string;
+      maximumDiscount: number | string;
+    },
+  ): Map<string, number> {
+    const out = new Map<string, number>();
+    const covered = lines.filter((l) =>
+      coupon.applicableVariantIds.includes(l.variantId),
+    );
+    if (covered.length === 0) return out;
+    const coveredSubtotal = covered.reduce((s, l) => s + l.lineTotal, 0);
+    if (coveredSubtotal <= 0) return out;
+    if (
+      Number(coupon.minimumOrderAmount) > 0 &&
+      coveredSubtotal < Number(coupon.minimumOrderAmount)
+    ) {
+      return out;
+    }
+
+    if (coupon.discountType === DiscountType.PERCENTAGE) {
+      const pct = Number(coupon.discountValue);
+      let totalDiscount = 0;
+      for (const line of covered) {
+        const d = Math.floor((line.lineTotal * pct) / 100);
+        if (d > 0) {
+          out.set(line.variantId, d);
+          totalDiscount += d;
+        }
+      }
+      const cap = Number(coupon.maximumDiscount);
+      if (cap > 0 && totalDiscount > cap) {
+        const ratio = cap / totalDiscount;
+        let runningSum = 0;
+        let largestId: string | null = null;
+        let largest = 0;
+        for (const line of covered) {
+          const before = out.get(line.variantId) ?? 0;
+          const scaled = Math.floor(before * ratio);
+          out.set(line.variantId, scaled);
+          runningSum += scaled;
+          if (scaled > largest) {
+            largest = scaled;
+            largestId = line.variantId;
+          }
+        }
+        const residual = cap - runningSum;
+        if (residual > 0 && largestId) {
+          out.set(largestId, (out.get(largestId) ?? 0) + residual);
+        }
+      }
+      return out;
+    }
+
+    if (coupon.discountType === DiscountType.FIXED_AMOUNT) {
+      const fixed = Math.min(
+        Number(coupon.discountValue),
+        coveredSubtotal,
+      );
+      if (fixed <= 0) return out;
+      let runningSum = 0;
+      let largestId: string | null = null;
+      let largest = 0;
+      for (const line of covered) {
+        const share = Math.floor((fixed * line.lineTotal) / coveredSubtotal);
+        out.set(line.variantId, share);
+        runningSum += share;
+        if (line.lineTotal > largest) {
+          largest = line.lineTotal;
+          largestId = line.variantId;
+        }
+      }
+      const residual = fixed - runningSum;
+      if (residual > 0 && largestId) {
+        out.set(largestId, (out.get(largestId) ?? 0) + residual);
+      }
+      return out;
+    }
+
+    return out;
   }
 }

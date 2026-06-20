@@ -4,6 +4,7 @@ import {
   IsEnum,
   IsInt,
   IsArray,
+  IsBoolean,
   IsISO8601,
   Min,
   MaxLength,
@@ -98,6 +99,22 @@ export class CreateCouponDto {
   @ArrayUnique()
   @IsEnum(CouponChannel, { each: true })
   applicableChannels?: CouponChannel[];
+
+  /** Variant IDs the coupon applies to. Empty / omitted = all variants. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  applicableVariantIds?: string[];
+
+  /**
+   * When TRUE, the coupon is silently attached by the cart's auto-apply
+   * hook whenever the cart contains a qualifying variant. The customer
+   * never needs to type a code. Use this for targeted rescue discounts
+   * — combine with `applicableVariantIds` to scope the lift.
+   */
+  @IsOptional()
+  @IsBoolean()
+  autoApply?: boolean;
 }
 
 /** Update a promotion. All fields optional; `code` cannot be changed. */
@@ -168,4 +185,13 @@ export class UpdateCouponDto {
   @ArrayUnique()
   @IsEnum(CouponChannel, { each: true })
   applicableChannels?: CouponChannel[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  applicableVariantIds?: string[];
+
+  @IsOptional()
+  @IsBoolean()
+  autoApply?: boolean;
 }

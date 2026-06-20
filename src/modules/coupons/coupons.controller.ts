@@ -96,6 +96,56 @@ export class CouponsController {
   }
 
   /**
+   * Look up auto-apply coupons that cover any of the cart's variants.
+   * Open to authenticated requests on any channel — the storefront,
+   * mobile app, and POS all call this when the cart changes so the
+   * customer immediately sees a rescue discount without typing a code.
+   *
+   * The endpoint never picks a coupon — it returns candidates ranked
+   * by expected discount magnitude, and the cart-side pricing engine
+   * (or quote) applies them. This keeps the math in one place.
+   */
+  @Get('auto-apply/search')
+  async findAutoApply(
+    @Query('variantIds') variantIds?: string | string[],
+    @Query('currency') currency?: string,
+    @Query('channel') channel?: string,
+  ) {
+    const ids = Array.isArray(variantIds)
+      ? variantIds
+      : variantIds
+        ? variantIds.split(',').filter(Boolean)
+        : [];
+    if (ids.length === 0) return { data: [] };
+    const cur = (currency ?? 'NGN').toUpperCase();
+    const ch = channel
+      ? (channel.toUpperCase() as
+          | 'STOREFRONT'
+          | 'MOBILE'
+          | 'POS')
+      : undefined;
+    const items = await this.couponsService.findAutoApplyCandidates(
+      ids,
+      cur,
+      ch as never,
+    );
+    return {
+      data: items.map((c) => ({
+        id: c.id,
+        code: c.code,
+        description: c.description,
+        discountType: c.discountType,
+        discountValue: Number(c.discountValue),
+        currency: c.currency,
+        minimumOrderAmount: Number(c.minimumOrderAmount),
+        maximumDiscount: Number(c.maximumDiscount),
+        applicableVariantIds: c.applicableVariantIds,
+        autoApply: c.autoApply,
+      })),
+    };
+  }
+
+  /**
    * Map a DTO onto the entity shape. The DTO carries ISO-8601 date strings;
    * the entity uses Date objects, so startsAt/expiresAt are converted here.
    */

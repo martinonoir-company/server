@@ -85,6 +85,30 @@ export class Coupon extends BaseEntity {
   applicableCategoryIds!: string[];
 
   /**
+   * Restrict to specific PRODUCT VARIANTS. Empty = applies to all
+   * (subject to the product / category filters above).
+   *
+   * When set on an auto-apply coupon, the discount is targeted at the
+   * matching cart lines only — not the whole subtotal. See the pricing
+   * engine's per-line discount path for the exact math.
+   */
+  @Column({ type: 'jsonb', default: [] })
+  applicableVariantIds!: string[];
+
+  /**
+   * When TRUE, this coupon does NOT require the customer to type a
+   * code. The pricing engine will automatically attach it to any cart
+   * that contains a qualifying line (see the auto-apply endpoint and
+   * cart hook).
+   *
+   * Auto-apply is intended for variant-level rescue discounts
+   * (overstock / slow-moving SKUs). The discount targets the matching
+   * lines only, never the whole subtotal.
+   */
+  @Column({ type: 'boolean', default: false })
+  autoApply!: boolean;
+
+  /**
    * Channels this coupon may be applied on. An empty array means "all
    * channels" (treated the same as listing every channel). A coupon scoped
    * to e.g. only POS will be rejected when applied from the storefront.

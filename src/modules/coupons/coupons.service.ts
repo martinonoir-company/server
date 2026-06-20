@@ -117,6 +117,63 @@ export class CouponsService {
   }
 
   /**
+   * Find auto-apply coupons that cover at least one of the supplied
+   * cart variant IDs. Used by the storefront / mobile / POS cart hook
+   * to surface a rescue discount silently — the customer never types
+   * a code.
+   *
+   * Returns all matches, sorted by discount magnitude (deeper first)
+   * so the caller can pick the most generous. Caller is responsible
+   * for verifying status/expiry/usage on the chosen coupon — we
+   * filter to ACTIVE here but the pricing engine re-checks via
+   * coupon.isValid before applying.
+   */
+  async findAutoApplyCandidates(
+    variantIds: string[],
+    currency: string,
+    channel?: CouponChannel,
+  ): Promise<Coupon[]> {
+    if (variantIds.length === 0) return [];
+
+    // jsonb ?| operator: "does the array contain ANY of these strings".
+    // Variant-scoped coupons match if applicableVariantIds overlaps the
+    // cart's variants. Coupons with an EMPTY applicableVariantIds list
+    // are NOT considered for auto-apply — auto-apply is intended for
+    // targeted rescue discounts; a "whole catalogue auto-apply" would
+    // be a sale, which the admin should run differently.
+    const qb = this.couponRepo
+      .createQueryBuilder('c')
+      .where('c."autoApply" = true')
+      .andWhere(`c.status = :st`, { st: CouponStatus.ACTIVE })
+      .andWhere(`jsonb_array_length(c."applicableVariantIds") > 0`)
+      .andWhere(
+        `c."applicableVariantIds" ?| ARRAY[:...variantIds]::text[]`,
+        { variantIds },
+      );
+
+    // Channel + currency filters mirror the typed-code path.
+    if (channel) {
+      qb.andWhere(
+        `(jsonb_array_length(c."applicableChannels") = 0 OR c."applicableChannels" ? :ch)`,
+        { ch: channel },
+      );
+    }
+    // Currency only matters for FIXED_AMOUNT coupons. PERCENTAGE
+    // discounts are currency-agnostic.
+    qb.andWhere(
+      `(c."discountType" = :pct OR c.currency = :cur)`,
+      { pct: DiscountType.PERCENTAGE, cur: currency },
+    );
+
+    // Inside the window (startsAt / expiresAt nullable).
+    const now = new Date();
+    qb.andWhere(`(c."startsAt" IS NULL OR c."startsAt" <= :now)`, { now });
+    qb.andWhere(`(c."expiresAt" IS NULL OR c."expiresAt" >= :now)`, { now });
+
+    return qb.getMany();
+  }
+
+  /**
    * Increment usage count after successful order.
    */
   async recordUsage(code: string): Promise<void> {
