@@ -436,11 +436,18 @@ export class AccountingService {
   }> {
     const page = Math.max(1, opts.page ?? 1);
     const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
+    // NOTE: order-by columns are referenced via the entity-alias
+    // property form (e.incurredAt) NOT the quoted SQL identifier
+    // (e."incurredAt"). When combined with skip/take, TypeORM rewrites
+    // the SELECT and tries to parse each orderBy expression back to a
+    // column on its EntityMetadata; the quoted form trips its tokenizer
+    // and explodes inside createOrderByCombinedWithSelectExpression
+    // with `Cannot read properties of undefined (reading 'databaseName')`.
     const qb = this.expenseRepo
       .createQueryBuilder('e')
       .leftJoinAndSelect('e.createdByUser', 'u')
-      .orderBy('e."incurredAt"', 'DESC')
-      .addOrderBy('e."createdAt"', 'DESC')
+      .orderBy('e.incurredAt', 'DESC')
+      .addOrderBy('e.createdAt', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
     if (!opts.includeDeleted) qb.andWhere(`e."deletedAt" IS NULL`);
@@ -838,10 +845,13 @@ export class AccountingService {
   }> {
     const page = Math.max(1, opts.page ?? 1);
     const limit = Math.min(100, Math.max(1, opts.limit ?? 30));
+    // See listExpenses note: orderBy must use the entity-alias property
+    // form, not the quoted SQL identifier, or skip/take + orderBy will
+    // crash inside TypeORM's createOrderByCombinedWithSelectExpression.
     const qb = this.auditRepo
       .createQueryBuilder('a')
       .leftJoinAndSelect('a.actor', 'u')
-      .orderBy('a."createdAt"', 'DESC')
+      .orderBy('a.createdAt', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
     if (opts.action) qb.andWhere(`a.action = :ac`, { ac: opts.action });
