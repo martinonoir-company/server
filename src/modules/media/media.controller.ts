@@ -46,6 +46,7 @@ export class MediaController {
   async confirm(@Body() dto: ConfirmUploadDto) {
     const media = await this.media.confirmUpload({
       productId: dto.productId,
+      variantId: dto.variantId ?? null,
       key: dto.key,
       altText: dto.altText,
       sortOrder: dto.sortOrder,

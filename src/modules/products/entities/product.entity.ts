@@ -130,6 +130,7 @@ export class ProductVariant extends BaseEntity {
 // ── Product Media ──
 
 @Entity('product_media')
+@Index(['productId', 'variantId'])
 export class ProductMedia extends BaseEntity {
   @Column({ type: 'varchar', length: 26 })
   productId!: string;
@@ -137,6 +138,23 @@ export class ProductMedia extends BaseEntity {
   @ManyToOne(() => Product, (p) => p.media, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'productId' })
   product!: Product;
+
+  /**
+   * Optional variant attachment. NULL = the media belongs to the
+   * product as a whole (gallery / hero shots that don't depend on a
+   * variant choice). Non-NULL = the media is specific to this variant —
+   * shown when the user selects this variant on the PDP, and as a
+   * thumbnail strip under the main image.
+   *
+   * Made nullable so the existing product-level rows keep working
+   * untouched on the upgrade path.
+   */
+  @Column({ type: 'varchar', length: 26, nullable: true })
+  variantId?: string | null;
+
+  @ManyToOne(() => ProductVariant, { nullable: true, onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'variantId' })
+  variant?: ProductVariant | null;
 
   @Column({ type: 'varchar', length: 1024 })
   url!: string;
@@ -147,6 +165,11 @@ export class ProductMedia extends BaseEntity {
   @Column({ type: 'enum', enum: ['IMAGE', 'VIDEO'], default: 'IMAGE' })
   mediaType!: 'IMAGE' | 'VIDEO';
 
+  /**
+   * Ordering inside a (productId, variantId) bucket. The list API
+   * sorts by (variantId NULLS FIRST, sortOrder) so product-level
+   * media is naturally listed before any variant-scoped media.
+   */
   @Column({ type: 'int', default: 0 })
   sortOrder!: number;
 

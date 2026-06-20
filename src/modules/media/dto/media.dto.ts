@@ -69,6 +69,15 @@ export class ConfirmUploadDto {
   @MaxLength(26)
   productId!: string;
 
+  /**
+   * Optional. When provided, the media row is attached to this specific
+   * variant. When omitted, the media is product-level (existing behaviour).
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(26)
+  variantId?: string;
+
   @IsString()
   @MaxLength(500)
   key!: string;

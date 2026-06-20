@@ -18,7 +18,11 @@ import {
   AllowedMime,
   MAX_UPLOAD_BYTES,
 } from './dto/media.dto';
-import { ProductMedia, Product } from '../products/entities/product.entity';
+import {
+  ProductMedia,
+  Product,
+  ProductVariant,
+} from '../products/entities/product.entity';
 import { CacheService } from '../../shared/services/cache.service';
 
 export interface PresignResult {
@@ -123,6 +127,14 @@ export class MediaService {
    */
   async confirmUpload(input: {
     productId: string;
+    /**
+     * Optional. When provided, the new media row attaches to this
+     * variant — the PDP shows it in the variant sub-strip and as the
+     * main image when this variant is selected. When omitted, the
+     * media attaches to the product as a whole (the existing
+     * pre-variant-images behaviour).
+     */
+    variantId?: string | null;
     key: string;
     altText?: string;
     sortOrder?: number;
@@ -134,21 +146,44 @@ export class MediaService {
       throw new NotFoundException(`Product ${input.productId} not found`);
     }
 
+    // If a variantId is supplied it must belong to this product.
+    // Otherwise we'd silently create orphaned media — easy to ship,
+    // very hard to clean up.
+    if (input.variantId) {
+      const variant = await this.mediaRepo.manager.findOne(ProductVariant, {
+        where: { id: input.variantId, productId: input.productId },
+      });
+      if (!variant) {
+        throw new NotFoundException(
+          `Variant ${input.variantId} not found on product ${input.productId}`,
+        );
+      }
+    }
+
     const url = this.publicUrlFor(input.key);
 
-    // Default sortOrder = next after existing media for the product
+    // Default sortOrder = next after existing media in the same bucket
+    // (product-level vs this specific variant). Buckets are independent
+    // so a variant's first image starts at 0 even when product-level
+    // media already exist.
     let sortOrder = input.sortOrder;
     if (sortOrder === undefined) {
-      const max = await this.mediaRepo
+      const qb = this.mediaRepo
         .createQueryBuilder('m')
         .select('MAX(m.sortOrder)', 'max')
-        .where('m.productId = :pid', { pid: input.productId })
-        .getRawOne<{ max: number | null }>();
+        .where('m."productId" = :pid', { pid: input.productId });
+      if (input.variantId) {
+        qb.andWhere('m."variantId" = :vid', { vid: input.variantId });
+      } else {
+        qb.andWhere('m."variantId" IS NULL');
+      }
+      const max = await qb.getRawOne<{ max: number | null }>();
       sortOrder = (max?.max ?? -1) + 1;
     }
 
     const media = this.mediaRepo.create({
       productId: input.productId,
+      variantId: input.variantId ?? null,
       url,
       altText: input.altText,
       mediaType: 'IMAGE',
@@ -187,11 +222,21 @@ export class MediaService {
   }
 
   /**
-   * Reorder an entire product's media gallery. `orderedIds` is the new
-   * sortOrder in ascending order (index 0 = first image). Ids not in
-   * the list are left untouched.
+   * Reorder media within a single bucket. `orderedIds` are the IDs in
+   * the new order (index 0 = first image). Ids not in the list are
+   * left untouched.
+   *
+   * sortOrder is scoped per (productId, variantId) so the product's own
+   * gallery and each variant's gallery have independent ordering.
+   * Callers usually pass IDs that all belong to the same bucket. We
+   * tolerate (but don't encourage) mixed-bucket IDs by updating each
+   * one's sortOrder to its index — within its own bucket this is fine,
+   * across buckets the caller gets what they asked for.
    */
-  async reorder(productId: string, orderedIds: string[]): Promise<ProductMedia[]> {
+  async reorder(
+    productId: string,
+    orderedIds: string[],
+  ): Promise<ProductMedia[]> {
     const media = await this.mediaRepo.find({ where: { productId } });
     if (media.length === 0) return [];
 
@@ -208,10 +253,15 @@ export class MediaService {
       await this.mediaRepo.save(updates);
       await this.cache.invalidateProducts();
     }
-    return this.mediaRepo.find({
-      where: { productId },
-      order: { sortOrder: 'ASC' },
-    });
+    // Return product-level rows first (variantId NULL), then each
+    // variant's bucket, both ordered by sortOrder. Stable order so the
+    // admin UI displays predictably.
+    return this.mediaRepo
+      .createQueryBuilder('m')
+      .where('m.productId = :pid', { pid: productId })
+      .orderBy('m.variantId', 'ASC', 'NULLS FIRST')
+      .addOrderBy('m.sortOrder', 'ASC')
+      .getMany();
   }
 
   /**
