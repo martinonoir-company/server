@@ -13,6 +13,7 @@ import { Product } from '../products/entities/product.entity';
 import { InventoryService } from '../inventory/inventory.service';
 import { MovementKind } from '../inventory/entities/inventory.entity';
 import { CartService } from '../cart/cart.service';
+import { ShippingService } from '../shipping/shipping.service';
 import { CouponsService } from '../coupons/coupons.service';
 import {
   CouponChannel,
@@ -43,6 +44,7 @@ export class OrdersService {
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly inventoryService: InventoryService,
     private readonly cartService: CartService,
+    private readonly shippingService: ShippingService,
     private readonly couponsService: CouponsService,
     private readonly emailService: EmailService,
     private readonly pushService: PushService,
@@ -180,7 +182,72 @@ export class OrdersService {
 
       const finalSubtotal = subtotal;
       const finalDiscountTotal = autoDiscountTotal;
-      const finalGrandTotal = finalSubtotal - finalDiscountTotal;
+
+      // 2c. Shipping fee — AAJ Express quote.
+      //
+      // POS sales are walk-ups: no shipping. The customer can opt out
+      // of shipping via dto.shippingOptOut. Everything else hits AAJ.
+      //
+      // The quote returns a price + a draft booking id; we store both
+      // so the post-payment booking call honours the same quote.
+      // ShippingService.calculateRates handles the live AAJ call and
+      // falls back to a zone estimate when AAJ is unreachable, so the
+      // checkout path is never blocked on AAJ availability.
+      const isPOSChannel = channel === OrderChannel.POS;
+      let shippingTotalKobo = 0;
+      let shippingQuoteId: string | null = null;
+      let shippingQuoteExpiresAt: Date | null = null;
+      const optOut = !!dto.shippingOptOut || isPOSChannel;
+      if (!optOut) {
+        try {
+          const cc =
+            dto.shippingAddress.country.length === 2
+              ? dto.shippingAddress.country.toUpperCase()
+              : 'NG';
+          const recipientAddr = {
+            name: `${dto.shippingAddress.firstName} ${dto.shippingAddress.lastName}`.trim(),
+            phone: dto.shippingAddress.phone ?? '+2348000000000',
+            email: dto.guestEmail ?? 'noreply@martinonoir.com',
+            addressLine1: dto.shippingAddress.line1,
+            addressLine2: dto.shippingAddress.line2,
+            city: dto.shippingAddress.city,
+            state: dto.shippingAddress.state,
+            stateOrProvinceCode: dto.shippingStateCode,
+            country: cc === 'NG' ? 'Nigeria' : dto.shippingAddress.country,
+            countryCode: cc,
+            postalCode: dto.shippingAddress.postalCode ?? '100001',
+          };
+          const rates = await this.shippingService.calculateRates({
+            country: cc,
+            state: dto.shippingAddress.state,
+            weightKg: Math.max(
+              0.5,
+              orderItems.reduce((s, i) => s + (i.quantity ?? 0), 0) * 0.5,
+            ),
+            currency,
+            subtotal: finalSubtotal,
+            recipient: recipientAddr,
+            itemsValueNgn: Math.round(finalSubtotal / 100),
+          });
+          if (rates.length > 0) {
+            const pick = rates[0]!;
+            shippingTotalKobo = pick.rate;
+            shippingQuoteId = pick.quoteId ?? null;
+            shippingQuoteExpiresAt = pick.expiresAt
+              ? new Date(pick.expiresAt)
+              : null;
+          }
+        } catch (err) {
+          this.logger.warn(
+            `AAJ quote failed at checkout: ${
+              (err as Error).message
+            } — order will be created with 0 shipping fee and retried post-payment.`,
+          );
+        }
+      }
+      const finalShippingTotal = shippingTotalKobo;
+      const finalGrandTotal =
+        finalSubtotal - finalDiscountTotal + finalShippingTotal;
 
       // 3. Create order. The order number is computed from the database
       //    inside this transaction; withUniqueOrderNumber retries with a
@@ -197,9 +264,12 @@ export class OrdersService {
           currency,
           subtotal: finalSubtotal,
           discountTotal: finalDiscountTotal,
-          shippingTotal: 0,
+          shippingTotal: finalShippingTotal,
           taxTotal: 0,
           grandTotal: finalGrandTotal,
+          shippingOptOut: optOut,
+          shippingQuoteId: shippingQuoteId ?? undefined,
+          shippingQuoteExpiresAt: shippingQuoteExpiresAt ?? undefined,
           paymentMethod: dto.paymentMethod,
           paidAt: isPOS ? new Date() : undefined,
           shippingAddress: dto.shippingAddress,

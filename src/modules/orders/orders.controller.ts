@@ -28,6 +28,7 @@ import { User } from '../users/entities/user.entity';
 import { IsArray, IsObject, IsString, IsNumber, IsOptional, IsEnum, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { CouponChannel } from '../coupons/entities/coupon.entity';
+import { ShippingDispatchService } from '../shipping/shipping-dispatch.service';
 
 class QuoteContextDto {
   @IsString() currency!: string;
@@ -70,6 +71,7 @@ export class OrdersController {
   constructor(
     private readonly ordersService: OrdersService,
     private readonly pricingEngine: PricingEngine,
+    private readonly shippingDispatch: ShippingDispatchService,
   ) {}
 
   // ── Price Quote (read-only, no side effects) ──
@@ -121,6 +123,77 @@ export class OrdersController {
   async findByNumber(@Param('orderNumber') orderNumber: string) {
     const order = await this.ordersService.findByOrderNumber(orderNumber);
     return { data: order };
+  }
+
+  // ── Shipping: dispatch progress (post-payment UI) ──
+  //
+  // Returns the current AAJ-shipping state for an order so the
+  // post-payment progress bar can render. Computed from the order row
+  // alone (no AAJ call) — fast, no rate-limit concern. The frontend
+  // polls this every ~3 seconds until trackingId is set or the order
+  // hits the retry ceiling.
+  @Get(':id/shipping')
+  async shippingState(@Param('id') id: string) {
+    const order = await this.ordersService.findOne(id);
+    const progress = order.shippingOptOut
+      ? 100
+      : order.shippingTrackingId
+        ? 100
+        : order.shippingBookingId
+          ? 66
+          : order.shippingRetryCount > 0
+            ? 10
+            : 0;
+    return {
+      data: {
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        optedOut: !!order.shippingOptOut,
+        bookingId: order.shippingBookingId ?? null,
+        trackingId: order.shippingTrackingId ?? null,
+        labelUrl: order.shippingLabelUrl ?? null,
+        status: order.shippingStatus ?? null,
+        progress,
+        lastError: order.shippingLastError ?? null,
+        retryCount: order.shippingRetryCount,
+      },
+    };
+  }
+
+  // ── Shipping: live tracking ──
+  //
+  // Calls AAJ Express's track-shipment endpoint (cached 60 seconds on
+  // the order row). Returns the customer-facing event timeline.
+  @Get(':id/tracking')
+  async tracking(@Param('id') id: string) {
+    const data = await this.shippingDispatch.getTracking(id);
+    return { data };
+  }
+
+  // ── Public tracking lookup by order number ──
+  //
+  // Used by the storefront's /track-order page so guests (and
+  // customers who didn't sign in) can track a shipment with just an
+  // order number. The endpoint discloses only shipping state — no
+  // PII, payment data, or line items.
+  @Public()
+  @Get('public/track/:orderNumber')
+  async publicTracking(@Param('orderNumber') orderNumber: string) {
+    const order = await this.ordersService.findByOrderNumber(orderNumber);
+    const data = await this.shippingDispatch.getTracking(order.id);
+    return {
+      data: {
+        orderNumber: order.orderNumber,
+        status: data.status,
+        description: data.description,
+        etaDays: data.etaDays,
+        etaDate: data.etaDate,
+        events: data.events,
+        trackingNumber: data.trackingNumber,
+        optedOut: data.optedOut,
+        pending: data.pending,
+      },
+    };
   }
 
   // ── Transition Status (generic admin path) ──

@@ -1,101 +1,156 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { AajProvider, AajAddress, AajPackageItem } from './aaj.provider';
 
 export interface ShippingRate {
   carrier: string;
   service: string;
   estimatedDays: { min: number; max: number };
-  /** Rate in minor units */
+  /** Rate in MINOR units (kobo/cents) so it lines up with the rest of pricing. */
   rate: number;
   currency: string;
+  /** AAJ draft booking id — passed through to create-booking later. */
+  quoteId?: string;
+  /** ISO timestamp the quote expires. */
+  expiresAt?: string;
 }
 
 export interface ShippingRateInput {
   country: string;
+  /** Human-readable state name. AAJ stateOrProvinceCode is resolved upstream. */
   state: string;
   weightKg: number;
   currency: string;
   subtotal: number;
+  /** Optional structured shipping address for the AAJ live path. */
+  recipient?: AajAddress;
+  /** Sender address (branch we ship from). */
+  sender?: AajAddress;
+  /** Item-level data for the quote payload. */
+  items?: AajPackageItem[];
+  /** Customer-declared value of all items in NGN (major units). */
+  itemsValueNgn?: number;
 }
 
 /**
  * Shipping rate calculator.
- * Uses zone-based flat rates for NG domestic, and weight-based for international.
- * TODO: Integrate with real carriers (GIG Logistics, DHL, FedEx) when ready.
+ *
+ * Primary path: hit AAJ Express's POST /quote and surface the result
+ * (one option per quote). The customer pays this fee as part of their
+ * order total via Paystack.
+ *
+ * Fallback path: when the AAJ provider runs in stub mode (no API key)
+ * OR the live call fails for any reason, we degrade to a zone-based
+ * estimate so checkout never breaks. The fallback is deliberately
+ * pessimistic (no free-shipping threshold per the latest business
+ * decision) so we don't accidentally underquote.
+ *
+ * Returned `rate` is always in MINOR units (kobo). AAJ returns major
+ * units (naira); we multiply by 100 once here. Every downstream
+ * consumer expects kobo.
  */
 @Injectable()
 export class ShippingService {
-  /** Nigerian domestic zones */
+  private readonly logger = new Logger(ShippingService.name);
+
+  /**
+   * NG zone fallbacks — used only when AAJ is unreachable. Rates are
+   * in MINOR units (kobo). These figures are intentionally above what
+   * AAJ usually charges; under-quoting at checkout would force us to
+   * eat the difference.
+   */
   private readonly NG_ZONES: Record<string, number> = {
-    'Lagos': 250000,       // ₦2,500
-    'Abuja': 350000,       // ₦3,500
-    'Rivers': 400000,      // ₦4,000
-    'Ogun': 300000,        // ₦3,000
-    'Oyo': 350000,         // ₦3,500
-    'DEFAULT': 500000,     // ₦5,000 for other states
+    Lagos: 250000,
+    Abuja: 350000,
+    Rivers: 400000,
+    Ogun: 300000,
+    Oyo: 350000,
+    DEFAULT: 500000,
   };
 
-  /** Free shipping threshold (minor units) */
-  private readonly FREE_SHIPPING_THRESHOLD_NGN = 5000000; // ₦50,000
-  private readonly FREE_SHIPPING_THRESHOLD_USD = 10000;   // $100
+  constructor(private readonly aaj: AajProvider) {}
 
+  /**
+   * Return the available shipping rates for a quote. Always returns at
+   * least one entry — AAJ's first option, or the fallback estimate.
+   *
+   * Caller passes a structured `recipient` + `sender` for the live
+   * path. When either is missing we degrade to the fallback (the
+   * /orders/quote endpoint, used during the checkout preview, may not
+   * have address fields yet).
+   */
   async calculateRates(input: ShippingRateInput): Promise<ShippingRate[]> {
+    // Try AAJ first when we have enough address data.
+    if (input.recipient && input.sender) {
+      try {
+        const res = await this.aaj.getQuote({
+          sender: input.sender,
+          receiver: input.recipient,
+          itemsValueNgn:
+            input.itemsValueNgn ??
+            Math.max(0, Math.round(input.subtotal / 100)),
+          weightKg: Math.max(0.1, input.weightKg),
+          items: input.items,
+          deliveryMode: 'DOOR_STEP',
+        });
+        if (res.ok) {
+          // AAJ amounts are NGN major units → store as kobo.
+          return [
+            {
+              carrier: 'AAJ Express',
+              service: 'Door delivery',
+              estimatedDays: { min: res.data.etaDays, max: res.data.etaDays + 2 },
+              rate: Math.round(res.data.totalNgn * 100),
+              currency: 'NGN',
+              quoteId: res.data.bookingId,
+              expiresAt: res.data.expiresAt,
+            },
+          ];
+        }
+        this.logger.warn(`AAJ quote failed: ${res.error} — using fallback.`);
+      } catch (err) {
+        this.logger.error(
+          `AAJ quote threw: ${err instanceof Error ? err.message : 'Unknown'}`,
+        );
+      }
+    }
+
+    return this.fallbackRates(input);
+  }
+
+  /**
+   * Fallback rate path. Used when AAJ is unreachable OR we don't have
+   * a recipient/sender address yet. The 50k-free-shipping rule that
+   * used to live here has been removed — every order pays shipping.
+   */
+  private fallbackRates(input: ShippingRateInput): ShippingRate[] {
     const rates: ShippingRate[] = [];
 
     if (input.country === 'NG') {
-      // Check free shipping threshold
-      const threshold = input.currency === 'USD'
-        ? this.FREE_SHIPPING_THRESHOLD_USD
-        : this.FREE_SHIPPING_THRESHOLD_NGN;
-
-      if (input.subtotal >= threshold) {
-        rates.push({
-          carrier: 'MartiniNoir',
-          service: 'Free Shipping',
-          estimatedDays: { min: 3, max: 7 },
-          rate: 0,
-          currency: input.currency,
-        });
-        return rates;
-      }
-
-      // Zone-based domestic
-      const zoneRate = this.NG_ZONES[input.state] ?? this.NG_ZONES['DEFAULT'];
+      const zoneRate =
+        this.NG_ZONES[input.state] ?? this.NG_ZONES['DEFAULT']!;
       rates.push({
-        carrier: 'Standard Delivery',
-        service: 'Domestic',
+        carrier: 'AAJ Express',
+        service: 'Door delivery (estimate)',
         estimatedDays: { min: 3, max: 7 },
-        rate: zoneRate!,
+        rate: zoneRate,
         currency: 'NGN',
       });
-
-      // Express option
       rates.push({
-        carrier: 'Express Delivery',
-        service: 'Domestic Express',
+        carrier: 'AAJ Express',
+        service: 'Express (estimate)',
         estimatedDays: { min: 1, max: 3 },
-        rate: Math.round(zoneRate! * 1.8),
+        rate: Math.round(zoneRate * 1.8),
         currency: 'NGN',
       });
-
     } else {
-      // International — weight-based
-      const baseRate = input.currency === 'USD' ? 2500 : 1500000; // $25 or ₦15,000
-      const perKg = input.currency === 'USD' ? 500 : 300000;     // $5/kg or ₦3,000/kg
+      const baseRate = input.currency === 'USD' ? 2500 : 1500000;
+      const perKg = input.currency === 'USD' ? 500 : 300000;
       const intlRate = baseRate + Math.ceil(input.weightKg) * perKg;
-
       rates.push({
-        carrier: 'International Standard',
-        service: 'International',
+        carrier: 'AAJ Express',
+        service: 'International (estimate)',
         estimatedDays: { min: 10, max: 21 },
         rate: intlRate,
-        currency: input.currency,
-      });
-
-      rates.push({
-        carrier: 'International Express',
-        service: 'Express International',
-        estimatedDays: { min: 5, max: 10 },
-        rate: Math.round(intlRate * 2),
         currency: input.currency,
       });
     }

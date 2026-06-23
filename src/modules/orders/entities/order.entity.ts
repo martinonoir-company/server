@@ -181,6 +181,74 @@ export class Order extends BaseEntity {
   @Column({ type: 'timestamptz', nullable: true })
   deliveredAt?: Date;
 
+  // ── AAJ Express shipping integration ──
+  //
+  // The carrier integration is async. We hold the quote at checkout so
+  // the customer sees a fixed price; AAJ honours the quoted total
+  // until expiry. After payment we book + process; AAJ returns the
+  // tracking id which is the customer-facing pointer.
+
+  /**
+   * True when the customer ticked "I don't need shipping" at checkout
+   * (will arrange pickup themselves). When true: no shipping fee on
+   * the order, no AAJ call after payment.
+   */
+  @Column({ type: 'boolean', default: false })
+  shippingOptOut!: boolean;
+
+  /** AAJ quote `booking` id (their draft id), so we can honour the price. */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  shippingQuoteId?: string;
+
+  /** When the AAJ quote expires; re-quote needed after this. */
+  @Column({ type: 'timestamptz', nullable: true })
+  shippingQuoteExpiresAt?: Date;
+
+  /** AAJ `_id` of the created booking — used as the path for processBooking. */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  shippingBookingId?: string;
+
+  /** Tracking id assigned by AAJ on processBooking — used for customer tracking. */
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  shippingTrackingId?: string;
+
+  /** URL to the printable shipping label PDF (returned by processBooking). */
+  @Column({ type: 'varchar', length: 1024, nullable: true })
+  shippingLabelUrl?: string;
+
+  /**
+   * AAJ shipment status enum: 0=LABEL_CREATED, 1=PICKED_UP, 2=IN_TRANSIT,
+   * 3=OUT_FOR_DELIVERY, 4=DELIVERED. Stored as-is so the UI maps it
+   * consistently.
+   */
+  @Column({ type: 'int', nullable: true })
+  shippingStatus?: number;
+
+  /** Cached event timeline from the last AAJ track call. */
+  @Column({ type: 'jsonb', nullable: true })
+  shippingEvents?: Array<{
+    dateTime: string;
+    status: number;
+    scanType: string;
+    description: string;
+    location: string;
+  }>;
+
+  /** Last successful track call — used to cache for ~60s. */
+  @Column({ type: 'timestamptz', nullable: true })
+  shippingLastTrackedAt?: Date;
+
+  /**
+   * Cumulative number of times the bookAndProcess job failed. Reset on
+   * success. Used by the retry worker to back off / page the admin.
+   */
+  @Column({ type: 'int', default: 0 })
+  shippingRetryCount!: number;
+
+  /** Last error from AAJ — surfaced to the admin alert. */
+  @Column({ type: 'text', nullable: true })
+  shippingLastError?: string;
+
   // ── Notes ──
   @Column({ type: 'text', nullable: true })
   customerNote?: string;

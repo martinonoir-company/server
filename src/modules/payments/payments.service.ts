@@ -31,6 +31,7 @@ import {
 } from './entities/payment.entity';
 import { Order, OrderStatus } from '../orders/entities/order.entity';
 import { AgentsService } from '../agents/agents.service';
+import { ShippingDispatchService } from '../shipping/shipping-dispatch.service';
 
 /** Input to record/begin a payment row. */
 export interface RecordPaymentInput {
@@ -78,6 +79,8 @@ export class PaymentsService {
     @Optional()
     @Inject(forwardRef(() => AgentsService))
     private readonly agentsService?: AgentsService,
+    @Optional()
+    private readonly shippingDispatchService?: ShippingDispatchService,
   ) {
     this.providers = new Map<PaymentProviderName, IPaymentProvider>([
       [PaymentProviderName.MONIEPOINT, moniepoint],
@@ -310,6 +313,20 @@ export class PaymentsService {
           }`,
         );
       }
+    }
+    // AAJ shipping: kick off the booking flow. Fire-and-forget — the
+    // retry worker re-tries every minute if the live call fails so we
+    // never block the payment path on AAJ availability.
+    if (this.shippingDispatchService) {
+      void this.shippingDispatchService
+        .bookAndProcess(orderId)
+        .catch((err) =>
+          this.logger.error(
+            `Shipping dispatch threw for ${orderId}: ${
+              (err as Error).message
+            }`,
+          ),
+        );
     }
   }
 

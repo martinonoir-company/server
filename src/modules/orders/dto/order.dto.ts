@@ -69,6 +69,26 @@ export class CreateOrderDto {
   @IsOptional()
   @IsString() @MaxLength(16)
   agentCode?: string;
+
+  /**
+   * Customer-side flag to skip the AAJ Express shipping flow entirely.
+   * When true: no shipping fee is charged, no booking is created on
+   * payment, and the post-payment dispatch UI is suppressed. The
+   * shipping address is still recorded for receipt/customer service
+   * purposes.
+   */
+  @IsOptional()
+  shippingOptOut?: boolean;
+
+  /**
+   * Optional override of the AAJ ISO 3166-2 state code (e.g. `LA` for
+   * Lagos). The server resolves this from the shipping address state
+   * name automatically; the field is here so the storefront can pass
+   * an explicit code when the state-name resolver might be ambiguous.
+   */
+  @IsOptional()
+  @IsString() @MaxLength(10)
+  shippingStateCode?: string;
 }
 
 export class UpdateOrderStatusDto {

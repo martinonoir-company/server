@@ -10,6 +10,7 @@ import { Order } from '../orders/entities/order.entity';
 import { Terminal } from '../branches/entities/terminal.entity';
 import { RefundsModule } from '../refunds/refunds.module';
 import { AgentsModule } from '../agents/agents.module';
+import { ShippingModule } from '../shipping/shipping.module';
 
 @Module({
   imports: [
@@ -19,6 +20,9 @@ import { AgentsModule } from '../agents/agents.module';
     // transfers, settled by transfer.success/failed).
     forwardRef(() => RefundsModule),
     forwardRef(() => AgentsModule),
+    // ShippingModule exposes ShippingDispatchService so the order-PAID
+    // hook can fire AAJ booking + processing.
+    ShippingModule,
   ],
   controllers: [PaymentsController],
   providers: [PaymentsService, MoniepointProvider, PaystackProvider, StripeProvider],
