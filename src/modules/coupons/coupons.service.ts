@@ -141,20 +141,26 @@ export class CouponsService {
     // are NOT considered for auto-apply — auto-apply is intended for
     // targeted rescue discounts; a "whole catalogue auto-apply" would
     // be a sale, which the admin should run differently.
+    // NOTE: use the FUNCTION forms jsonb_exists_any / jsonb_exists rather
+    // than the `?|` and `?` operators. TypeORM's query builder treats `?`
+    // as a parameter placeholder and mangles those operators, so the
+    // operator form silently matched nothing — which is exactly why
+    // auto-apply coupons never fired. The function forms are the
+    // documented equivalents and bind cleanly.
     const qb = this.couponRepo
       .createQueryBuilder('c')
       .where('c."autoApply" = true')
       .andWhere(`c.status = :st`, { st: CouponStatus.ACTIVE })
       .andWhere(`jsonb_array_length(c."applicableVariantIds") > 0`)
       .andWhere(
-        `c."applicableVariantIds" ?| ARRAY[:...variantIds]::text[]`,
+        `jsonb_exists_any(c."applicableVariantIds", ARRAY[:...variantIds]::text[])`,
         { variantIds },
       );
 
     // Channel + currency filters mirror the typed-code path.
     if (channel) {
       qb.andWhere(
-        `(jsonb_array_length(c."applicableChannels") = 0 OR c."applicableChannels" ? :ch)`,
+        `(jsonb_array_length(c."applicableChannels") = 0 OR jsonb_exists(c."applicableChannels", :ch))`,
         { ch: channel },
       );
     }
