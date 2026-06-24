@@ -158,8 +158,10 @@ export class AgentsService {
     const accountName = verify.accountName.trim();
     if (!this.nameMatchesAccount(input.firstName, input.lastName, accountName)) {
       throw new BadRequestException(
-        `Bank account belongs to "${accountName}" — it must match your name. ` +
-          `Use an account in your own name to sign up.`,
+        `Name mismatch: the bank account is registered to "${accountName}", ` +
+          `which does not share any name with "${input.firstName} ${input.lastName}". ` +
+          `At least one of your names must match the bank account name. ` +
+          `Use a bank account in your own name, or check the name you entered.`,
       );
     }
 
@@ -218,10 +220,16 @@ export class AgentsService {
       .getOne();
     if (!user) {
       await argon2.hash('dummy', ARGON2_OPTIONS);
-      throw new UnauthorizedException('Invalid email or password');
+      throw new UnauthorizedException(
+        'No agent account exists for this email. Check the email, or apply to become an agent.',
+      );
     }
     const ok = await argon2.verify(user.passwordHash, password);
-    if (!ok) throw new UnauthorizedException('Invalid email or password');
+    if (!ok) {
+      throw new UnauthorizedException(
+        'Incorrect password for this agent account.',
+      );
+    }
     const agent = await this.agentRepo.findOne({ where: { userId: user.id } });
     if (!agent) {
       throw new UnauthorizedException('Agent profile missing — contact support');
@@ -909,11 +917,13 @@ export class AgentsService {
   }
 
   /**
-   * Loose name-match: tokenise both, compare set-overlap. The bank-resolve
-   * result usually returns "LAST FIRST MIDDLE" or "FIRST MIDDLE LAST"
-   * depending on the bank, so we don't enforce order. We require BOTH
-   * first and last name tokens to appear (case-insensitive, alphanumeric
-   * tokens only).
+   * Loose name-match: tokenise both the form name and the bank-resolved
+   * account name, and require that AT LEAST ONE token is shared. Names
+   * commonly vary between the form and the bank record — a registrant
+   * who types "Mark Jones" may have "MARK HERIOS JONES" on the account.
+   * As long as one name part overlaps, we accept it. Order is ignored
+   * (banks return LAST-FIRST-MIDDLE or FIRST-MIDDLE-LAST). Tokens are
+   * case-insensitive and at least 2 chars (drops initials / noise).
    */
   private nameMatchesAccount(
     firstName: string,
@@ -926,9 +936,9 @@ export class AgentsService {
         .split(/[^A-Z]+/)
         .filter((t) => t.length >= 2);
     const accountTokens = new Set(tokenise(accountName));
-    const fn = tokenise(firstName)[0];
-    const ln = tokenise(lastName)[0];
-    if (!fn || !ln) return false;
-    return accountTokens.has(fn) && accountTokens.has(ln);
+    const formTokens = tokenise(`${firstName} ${lastName}`);
+    if (formTokens.length === 0 || accountTokens.size === 0) return false;
+    // Accept when any form token appears in the account name.
+    return formTokens.some((t) => accountTokens.has(t));
   }
 }
