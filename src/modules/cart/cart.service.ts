@@ -235,11 +235,22 @@ export class CartService {
         })
       : [];
     const firstImageByProduct = new Map<string, string>();
+    // First image tagged to a specific variant, so the merged cart thumbnail
+    // matches the chosen variant rather than always showing the main image.
+    const firstImageByVariant = new Map<string, string>();
     for (const m of mediaRows) {
-      if (m.mediaType === 'IMAGE' && !firstImageByProduct.has(m.productId)) {
+      if (m.mediaType !== 'IMAGE') continue;
+      if (m.variantId && !firstImageByVariant.has(m.variantId)) {
+        firstImageByVariant.set(m.variantId, m.url);
+      }
+      if (!m.variantId && !firstImageByProduct.has(m.productId)) {
         firstImageByProduct.set(m.productId, m.url);
       }
     }
+    const imageForVariant = (variantId: string, productId: string) =>
+      firstImageByVariant.get(variantId) ??
+      firstImageByProduct.get(productId) ??
+      null;
 
     await this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(CartItem);
@@ -261,7 +272,8 @@ export class CartService {
           existing.priceNgn = Number(variant.retailPriceNgn);
           existing.priceUsd = Number(variant.retailPriceUsd);
           existing.options = variant.options ?? null;
-          existing.imageUrl = firstImageByProduct.get(product.id) ?? existing.imageUrl;
+          existing.imageUrl =
+            imageForVariant(variant.id, product.id) ?? existing.imageUrl;
           await repo.save(existing);
         } else {
           await repo.save(
@@ -277,7 +289,7 @@ export class CartService {
               priceNgn: Number(variant.retailPriceNgn),
               priceUsd: Number(variant.retailPriceUsd),
               options: variant.options ?? null,
-              imageUrl: firstImageByProduct.get(product.id) ?? null,
+              imageUrl: imageForVariant(variant.id, product.id),
             }),
           );
         }
@@ -306,10 +318,19 @@ export class CartService {
       throw new BadRequestException('Product is not available');
     }
 
-    const firstImage = await this.mediaRepo.findOne({
-      where: { productId: product.id, mediaType: 'IMAGE' },
+    // Prefer an image tagged to this specific variant so the cart thumbnail
+    // matches what the customer selected; fall back to the product's first
+    // image when the variant has none of its own.
+    const variantImage = await this.mediaRepo.findOne({
+      where: { productId: product.id, variantId, mediaType: 'IMAGE' },
       order: { sortOrder: 'ASC' },
     });
+    const firstImage =
+      variantImage ??
+      (await this.mediaRepo.findOne({
+        where: { productId: product.id, mediaType: 'IMAGE' },
+        order: { sortOrder: 'ASC' },
+      }));
 
     return { variant, product, imageUrl: firstImage?.url ?? null };
   }
