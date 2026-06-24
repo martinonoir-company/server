@@ -1,12 +1,13 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import {
   Coupon,
   CouponChannel,
   CouponStatus,
   DiscountType,
 } from './entities/coupon.entity';
+import { ProductVariant } from '../products/entities/product.entity';
 
 export interface ApplyCouponResult {
   valid: boolean;
@@ -20,6 +21,8 @@ export interface ApplyCouponResult {
 export class CouponsService {
   constructor(
     @InjectRepository(Coupon) private readonly couponRepo: Repository<Coupon>,
+    @InjectRepository(ProductVariant)
+    private readonly variantRepo: Repository<ProductVariant>,
   ) {}
 
   async create(data: Partial<Coupon>): Promise<Coupon> {
@@ -29,8 +32,39 @@ export class CouponsService {
     const existing = await this.couponRepo.findOne({ where: { code: data.code } });
     if (existing) throw new BadRequestException(`Coupon code "${data.code}" already exists`);
 
+    await this.expandProductScopeToVariants(data);
+
     const coupon = this.couponRepo.create(data);
     return this.couponRepo.save(coupon);
+  }
+
+  /**
+   * Product-level promotions. The whole auto-apply pipeline (matching,
+   * per-line pricing, and the storefront badge) works on variant IDs. To
+   * let an admin scope a promotion to a PRODUCT rather than hand-pick
+   * variants, we expand the product's active variant IDs into
+   * applicableVariantIds here, at write time, and union them with any
+   * variants the admin listed explicitly. This keeps the variant pipeline
+   * untouched while making product scope "just work".
+   *
+   * Only runs when applicableProductIds is provided. Variant-only
+   * promotions (the existing behaviour) are left exactly as-is.
+   */
+  private async expandProductScopeToVariants(
+    data: Partial<Coupon>,
+  ): Promise<void> {
+    const productIds = data.applicableProductIds ?? [];
+    if (productIds.length === 0) return;
+
+    const variants = await this.variantRepo.find({
+      where: { productId: In(productIds), isActive: true },
+      select: { id: true },
+    });
+    const fromProducts = variants.map((v) => v.id);
+    const explicit = data.applicableVariantIds ?? [];
+    data.applicableVariantIds = Array.from(
+      new Set([...explicit, ...fromProducts]),
+    );
   }
 
   async findByCode(code: string): Promise<Coupon> {
@@ -206,43 +240,67 @@ export class CouponsService {
     )).filter((c) => c.isValid);
     if (candidates.length === 0) return [];
 
-    // Rank "best" discount per variant. Percentage and fixed aren't directly
-    // comparable without a price, so prefer the larger percentage, else the
-    // larger fixed amount, and let percentage win ties — that's the headline
-    // a shopper expects to see.
+    // Load the variants' retail prices so we can rank competing promotions
+    // by the ACTUAL money saved, not an arbitrary type bias. Without this a
+    // small percentage could out-rank a larger fixed amount (the "shows 5%
+    // off when it's a ₦3000 discount" bug).
+    const variants = await this.variantRepo.find({
+      where: { id: In(variantIds) },
+      select: { id: true, retailPriceNgn: true, retailPriceUsd: true },
+    });
+    const priceOf = (variantId: string): number => {
+      const v = variants.find((x) => x.id === variantId);
+      if (!v) return 0;
+      return Number(currency === 'USD' ? v.retailPriceUsd : v.retailPriceNgn);
+    };
+
+    // Actual discount (minor units) a coupon yields on one variant's unit
+    // price — mirrors the per-line math, including the percentage cap.
+    const discountFor = (c: Coupon, price: number): number => {
+      if (price <= 0) return 0;
+      if (c.discountType === DiscountType.PERCENTAGE) {
+        let d = Math.floor((price * Number(c.discountValue)) / 100);
+        const cap = Number(c.maximumDiscount);
+        if (cap > 0 && d > cap) d = cap;
+        return d;
+      }
+      if (c.discountType === DiscountType.FIXED_AMOUNT) {
+        return Math.min(Number(c.discountValue), price);
+      }
+      return 0; // FREE_SHIPPING — no price-cut badge.
+    };
+
     const best = new Map<
       string,
-      { discountType: DiscountType; discountValue: number; currency: string | null }
+      {
+        amount: number;
+        discountType: DiscountType;
+        discountValue: number;
+        currency: string | null;
+      }
     >();
-    const weight = (c: Coupon) =>
-      c.discountType === DiscountType.PERCENTAGE
-        ? 1_000_000 + Number(c.discountValue)
-        : Number(c.discountValue);
     for (const c of candidates) {
       if (c.discountType === DiscountType.FREE_SHIPPING) continue;
       for (const vId of c.applicableVariantIds) {
         if (!variantIds.includes(vId)) continue;
+        const amount = discountFor(c, priceOf(vId));
+        if (amount <= 0) continue;
         const prev = best.get(vId);
-        const cand = {
-          discountType: c.discountType,
-          discountValue: Number(c.discountValue),
-          currency: c.currency ?? null,
-        };
-        if (
-          !prev ||
-          weight(c) >
-            weight({
-              discountType: prev.discountType,
-              discountValue: prev.discountValue,
-            } as Coupon)
-        ) {
-          best.set(vId, cand);
+        if (!prev || amount > prev.amount) {
+          best.set(vId, {
+            amount,
+            discountType: c.discountType,
+            discountValue: Number(c.discountValue),
+            currency: c.currency ?? null,
+          });
         }
       }
     }
     return Array.from(best.entries()).map(([variantId, v]) => ({
       variantId,
-      ...v,
+      discountType: v.discountType,
+      discountValue: v.discountValue,
+      currency: v.currency,
     }));
   }
 
@@ -449,6 +507,18 @@ export class CouponsService {
     const coupon = await this.findById(id);
     // Guard: the code is identity — do not allow it to drift.
     delete (data as { code?: string }).code;
+    // If the product scope is part of this update, re-expand it into
+    // applicableVariantIds (see expandProductScopeToVariants). Uses the
+    // product list from the payload, or the coupon's current one when the
+    // payload only touches variants.
+    if (
+      data.applicableProductIds !== undefined ||
+      data.applicableVariantIds !== undefined
+    ) {
+      data.applicableProductIds =
+        data.applicableProductIds ?? coupon.applicableProductIds;
+      await this.expandProductScopeToVariants(data);
+    }
     Object.assign(coupon, data);
     return this.couponRepo.save(coupon);
   }
