@@ -17,6 +17,7 @@ import { CouponsService } from './coupons.service';
 import { CreateCouponDto, UpdateCouponDto } from './dto/coupon.dto';
 import { Coupon, CouponStatus } from './entities/coupon.entity';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
+import { Public } from '../../shared/decorators/public.decorator';
 import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
 import { Permission } from '../users/entities/role.entity';
 
@@ -143,6 +144,38 @@ export class CouponsController {
         autoApply: c.autoApply,
       })),
     };
+  }
+
+  /**
+   * Public storefront discount badges. Given a product's variant IDs,
+   * return the best active promotional discount per variant so the PDP
+   * can show "20% off" / "₦400 off" — including for guests, who never
+   * have a JWT. Display-only; the quote/checkout remains authoritative
+   * for the amount actually applied.
+   */
+  @Public()
+  @Get('promotions/active')
+  async findActivePromotions(
+    @Query('variantIds') variantIds?: string | string[],
+    @Query('currency') currency?: string,
+    @Query('channel') channel?: string,
+  ) {
+    const ids = Array.isArray(variantIds)
+      ? variantIds
+      : variantIds
+        ? variantIds.split(',').filter(Boolean)
+        : [];
+    if (ids.length === 0) return { data: [] };
+    const cur = (currency ?? 'NGN').toUpperCase();
+    const ch = channel
+      ? (channel.toUpperCase() as 'STOREFRONT' | 'MOBILE' | 'POS')
+      : undefined;
+    const data = await this.couponsService.findVariantPromotions(
+      ids,
+      cur,
+      ch as never,
+    );
+    return { data };
   }
 
   /**

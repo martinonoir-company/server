@@ -180,6 +180,73 @@ export class CouponsService {
   }
 
   /**
+   * Storefront discount badge: for each requested variant, the best active
+   * promotional discount (auto-apply, variant-scoped). Returns only variants
+   * that actually have a live promotion, so the PDP can render "20% off" /
+   * "₦400 off" when a variant is selected. No order context — this is a
+   * display hint, not the binding discount (the quote/checkout remains the
+   * source of truth for the amount actually applied).
+   */
+  async findVariantPromotions(
+    variantIds: string[],
+    currency: string,
+    channel?: CouponChannel,
+  ): Promise<
+    Array<{
+      variantId: string;
+      discountType: DiscountType;
+      discountValue: number;
+      currency: string | null;
+    }>
+  > {
+    const candidates = (await this.findAutoApplyCandidates(
+      variantIds,
+      currency,
+      channel,
+    )).filter((c) => c.isValid);
+    if (candidates.length === 0) return [];
+
+    // Rank "best" discount per variant. Percentage and fixed aren't directly
+    // comparable without a price, so prefer the larger percentage, else the
+    // larger fixed amount, and let percentage win ties — that's the headline
+    // a shopper expects to see.
+    const best = new Map<
+      string,
+      { discountType: DiscountType; discountValue: number; currency: string | null }
+    >();
+    const weight = (c: Coupon) =>
+      c.discountType === DiscountType.PERCENTAGE
+        ? 1_000_000 + Number(c.discountValue)
+        : Number(c.discountValue);
+    for (const c of candidates) {
+      if (c.discountType === DiscountType.FREE_SHIPPING) continue;
+      for (const vId of c.applicableVariantIds) {
+        if (!variantIds.includes(vId)) continue;
+        const prev = best.get(vId);
+        const cand = {
+          discountType: c.discountType,
+          discountValue: Number(c.discountValue),
+          currency: c.currency ?? null,
+        };
+        if (
+          !prev ||
+          weight(c) >
+            weight({
+              discountType: prev.discountType,
+              discountValue: prev.discountValue,
+            } as Coupon)
+        ) {
+          best.set(vId, cand);
+        }
+      }
+    }
+    return Array.from(best.entries()).map(([variantId, v]) => ({
+      variantId,
+      ...v,
+    }));
+  }
+
+  /**
    * Pick the best auto-apply coupon for a set of cart lines and return
    * the resolved per-line discount distribution. This is the single
    * source-of-truth math reused by:
