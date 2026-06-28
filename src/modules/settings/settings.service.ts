@@ -1,34 +1,39 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { AppSetting, SETTING_KEYS } from './entities/app-setting.entity';
+import { DataSource } from 'typeorm';
+import { SETTING_KEYS } from './entities/app-setting.entity';
 import { DEFAULT_WHOLESALE_MIN_QTY } from '../../shared/constants/wholesale';
 
+/**
+ * Reads/writes the shared `app_settings` key/value table — the SAME table the
+ * agents module uses for the commission rate. That table predates this module
+ * and has the shape (key PK, value jsonb, updatedAt, updatedBy) — NO id /
+ * createdAt / deletedAt — so we use raw SQL here rather than a TypeORM entity
+ * (an entity extending BaseEntity would query a non-existent `id` column).
+ */
 @Injectable()
 export class SettingsService {
-  constructor(
-    @InjectRepository(AppSetting)
-    private readonly repo: Repository<AppSetting>,
-  ) {}
+  constructor(private readonly dataSource: DataSource) {}
 
-  /** Raw value for a key, or null if unset. */
-  async get(key: string): Promise<string | null> {
-    const row = await this.repo.findOne({ where: { key } });
-    return row?.value ?? null;
+  /** Raw value for a key (parsed from jsonb), or null if unset. */
+  async get(key: string): Promise<unknown> {
+    const rows = await this.dataSource.query(
+      `SELECT "value" FROM "app_settings" WHERE "key" = $1`,
+      [key],
+    );
+    return rows[0]?.value ?? null;
   }
 
-  /** Upsert a key's value. */
-  async set(key: string, value: string, updatedBy?: string): Promise<void> {
-    const existing = await this.repo.findOne({ where: { key } });
-    if (existing) {
-      existing.value = value;
-      existing.updatedBy = updatedBy ?? null;
-      await this.repo.save(existing);
-    } else {
-      await this.repo.save(
-        this.repo.create({ key, value, updatedBy: updatedBy ?? null }),
-      );
-    }
+  /** Upsert a key's value (stored as jsonb). */
+  async set(key: string, value: unknown, updatedBy?: string): Promise<void> {
+    await this.dataSource.query(
+      `INSERT INTO "app_settings" ("key", "value", "updatedAt", "updatedBy")
+       VALUES ($1, $2::jsonb, now(), $3)
+       ON CONFLICT ("key") DO UPDATE
+         SET "value" = EXCLUDED."value",
+             "updatedAt" = EXCLUDED."updatedAt",
+             "updatedBy" = EXCLUDED."updatedBy"`,
+      [key, JSON.stringify(value), updatedBy ?? null],
+    );
   }
 
   /**
@@ -38,14 +43,14 @@ export class SettingsService {
    */
   async getWholesaleMinQty(): Promise<number> {
     const raw = await this.get(SETTING_KEYS.WHOLESALE_MIN_QTY);
-    const n = raw != null ? parseInt(raw, 10) : NaN;
+    const n = typeof raw === 'number' ? raw : Number(raw);
     if (!Number.isFinite(n) || n < 1) return DEFAULT_WHOLESALE_MIN_QTY;
     return Math.floor(n);
   }
 
   async setWholesaleMinQty(qty: number, updatedBy?: string): Promise<number> {
     const v = Math.max(1, Math.floor(qty));
-    await this.set(SETTING_KEYS.WHOLESALE_MIN_QTY, String(v), updatedBy);
+    await this.set(SETTING_KEYS.WHOLESALE_MIN_QTY, v, updatedBy);
     return v;
   }
 

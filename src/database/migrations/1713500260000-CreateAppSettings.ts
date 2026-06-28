@@ -1,9 +1,15 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
- * Key-value store for admin-configurable store settings (app_settings).
- * First consumer: the wholesale minimum order quantity. Additive — no
- * existing table is touched.
+ * Ensures the shared `app_settings` key/value table exists for the settings
+ * module. This table is ALSO created by the marketing-agents migration
+ * (1713500170000) with the same shape — key PK, value jsonb, updatedAt,
+ * updatedBy. Both use CREATE TABLE IF NOT EXISTS so whichever runs first
+ * wins and the other is a no-op. Kept here so a fresh DB that somehow skips
+ * the agents migration still has the table for SettingsService.
+ *
+ * IMPORTANT: the shape must match the agents migration exactly (no id /
+ * createdAt / deletedAt). SettingsService uses raw SQL against it.
  */
 export class CreateAppSettings1713500260000 implements MigrationInterface {
   name = 'CreateAppSettings1713500260000';
@@ -11,24 +17,17 @@ export class CreateAppSettings1713500260000 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "app_settings" (
-        "id" varchar(26) NOT NULL,
-        "createdAt" timestamptz NOT NULL DEFAULT now(),
-        "updatedAt" timestamptz NOT NULL DEFAULT now(),
-        "deletedAt" timestamptz,
-        "key" varchar(100) NOT NULL,
-        "value" text NOT NULL,
-        "updatedBy" varchar(26),
-        CONSTRAINT "PK_app_settings" PRIMARY KEY ("id")
+        "key"        varchar(100) NOT NULL,
+        "value"      jsonb        NOT NULL,
+        "updatedAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+        "updatedBy"  varchar(26),
+        CONSTRAINT "PK_app_settings" PRIMARY KEY ("key")
       );
-    `);
-    await queryRunner.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS "IDX_app_settings_key"
-        ON "app_settings" ("key");
     `);
   }
 
-  public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP INDEX IF EXISTS "IDX_app_settings_key";`);
-    await queryRunner.query(`DROP TABLE IF EXISTS "app_settings";`);
+  public async down(): Promise<void> {
+    // No-op: the table is shared with the agents module; dropping it here
+    // would break commission settings. Leave it in place.
   }
 }
