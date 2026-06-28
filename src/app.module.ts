@@ -35,6 +35,7 @@ import { PosSessionsModule } from './modules/pos-sessions/pos-sessions.module';
 import { RefundsModule } from './modules/refunds/refunds.module';
 import { AgentsModule } from './modules/agents/agents.module';
 import { AccountingModule } from './modules/accounting/accounting.module';
+import { SettingsModule } from './modules/settings/settings.module';
 
 @Module({
   imports: [
@@ -100,6 +101,7 @@ import { AccountingModule } from './modules/accounting/accounting.module';
     RefundsModule,
     AgentsModule,
     AccountingModule,
+    SettingsModule,
   ],
   controllers: [AppController],
   providers: [

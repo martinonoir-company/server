@@ -30,7 +30,7 @@ import {
   MarkDeliveredDto,
 } from './dto/order.dto';
 import { withUniqueOrderNumber } from './order-number.util';
-import { MIN_WHOLESALE_QTY } from '../../shared/constants/wholesale';
+import { SettingsService } from '../settings/settings.service';
 
 @Injectable()
 export class OrdersService {
@@ -49,6 +49,7 @@ export class OrdersService {
     private readonly couponsService: CouponsService,
     private readonly emailService: EmailService,
     private readonly pushService: PushService,
+    private readonly settingsService: SettingsService,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -67,6 +68,9 @@ export class OrdersService {
     const currency = dto.currency ?? 'NGN';
 
     const channel = dto.channel ?? OrderChannel.STOREFRONT;
+
+    // Admin-configurable wholesale minimum (falls back to the default).
+    const minWholesaleQty = await this.settingsService.getWholesaleMinQty();
 
     const order = await this.dataSource.transaction(async (manager) => {
       // 1. Resolve variants and calculate totals
@@ -127,10 +131,10 @@ export class OrdersService {
         if (
           lineWholesale &&
           !staffChannel &&
-          cartItem.quantity < MIN_WHOLESALE_QTY
+          cartItem.quantity < minWholesaleQty
         ) {
           throw new BadRequestException(
-            `Wholesale orders require a minimum quantity of ${MIN_WHOLESALE_QTY} per item. ` +
+            `Wholesale orders require a minimum quantity of ${minWholesaleQty} per item. ` +
               `"${product.name}${variant.name ? ` — ${variant.name}` : ''}" has only ${cartItem.quantity}.`,
           );
         }

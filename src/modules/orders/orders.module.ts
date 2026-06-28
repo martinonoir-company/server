@@ -10,6 +10,7 @@ import { InventoryModule } from '../inventory/inventory.module';
 import { CouponsModule } from '../coupons/coupons.module';
 import { ShippingModule } from '../shipping/shipping.module';
 import { CartModule } from '../cart/cart.module';
+import { SettingsModule } from '../settings/settings.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { CartModule } from '../cart/cart.module';
     CouponsModule,
     ShippingModule,
     CartModule,
+    SettingsModule,
   ],
   controllers: [OrdersController],
   providers: [OrdersService, PricingEngine],
