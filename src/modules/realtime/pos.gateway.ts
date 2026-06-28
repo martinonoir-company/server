@@ -209,7 +209,15 @@ export class PosGateway implements OnGatewayConnection, OnGatewayDisconnect {
    */
   emitDispatchNew(payload: DispatchNewPayload): void {
     try {
-      this.server?.to(DISPATCH_ROOM).emit(PosServerEvent.DISPATCH_NEW, payload);
+      if (!this.server) {
+        this.logger.warn('emitDispatchNew: socket server not ready');
+        return;
+      }
+      this.server.to(DISPATCH_ROOM).emit(PosServerEvent.DISPATCH_NEW, payload);
+      const room = this.server.sockets.adapter.rooms.get(DISPATCH_ROOM);
+      this.logger.log(
+        `dispatch:new emitted for ${payload.orderNumber} to ${room?.size ?? 0} client(s) in '${DISPATCH_ROOM}'`,
+      );
     } catch (err) {
       this.logger.warn(
         `emitDispatchNew failed (non-fatal): ${err instanceof Error ? err.message : err}`,

@@ -343,26 +343,57 @@ export class PaymentsService {
           where: { id: orderId },
           relations: ['items'],
         });
-        if (order && order.dispatchStatus === 'PENDING') {
-          const addr = order.shippingAddress;
-          this.posGateway.emitDispatchNew({
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            channel: order.channel,
-            currency: order.currency,
-            grandTotal: Number(order.grandTotal),
-            itemCount: (order.items ?? []).reduce(
-              (s, i) => s + (i.quantity ?? 0),
-              0,
-            ),
-            customerName: addr
-              ? `${addr.firstName} ${addr.lastName}`.trim()
-              : (order.guestEmail ?? 'Customer'),
-            city: addr?.city,
-            state: addr?.state,
-            createdAt: (order.createdAt ?? new Date()).toISOString(),
-          });
+        if (!order) {
+          this.logger.warn(`Dispatch alert: order ${orderId} not found`);
+          return;
         }
+        // An order needs branch dispatch when it ships from a branch:
+        // storefront/mobile channel, not opted out of shipping. We prefer the
+        // explicit dispatchStatus flag (set at checkout) but fall back to the
+        // shipping fields so orders created before that column existed — or by
+        // any path that didn't set it — still raise the alert. Also backfill
+        // the flag so the POS dispatch queue lists the order.
+        const isStaffChannel = order.channel === 'POS' || order.channel === 'ADMIN';
+        const needsDispatch =
+          order.dispatchStatus === 'PENDING' ||
+          (!order.dispatchStatus && !order.shippingOptOut && !isStaffChannel);
+
+        if (!needsDispatch || order.dispatchStatus === 'DISPATCHED') {
+          this.logger.debug(
+            `Dispatch alert skipped for ${order.orderNumber} ` +
+              `(dispatchStatus=${order.dispatchStatus ?? 'null'}, ` +
+              `optOut=${order.shippingOptOut}, channel=${order.channel})`,
+          );
+          return;
+        }
+
+        // Backfill PENDING so the dispatch queue + admin reflect it.
+        if (order.dispatchStatus !== 'PENDING') {
+          order.dispatchStatus = 'PENDING';
+          await this.orderRepo.update(order.id, { dispatchStatus: 'PENDING' });
+        }
+
+        const addr = order.shippingAddress;
+        this.posGateway.emitDispatchNew({
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          channel: order.channel,
+          currency: order.currency,
+          grandTotal: Number(order.grandTotal),
+          itemCount: (order.items ?? []).reduce(
+            (s, i) => s + (i.quantity ?? 0),
+            0,
+          ),
+          customerName: addr
+            ? `${addr.firstName} ${addr.lastName}`.trim()
+            : (order.guestEmail ?? 'Customer'),
+          city: addr?.city,
+          state: addr?.state,
+          createdAt: (order.createdAt ?? new Date()).toISOString(),
+        });
+        this.logger.log(
+          `Dispatch alert emitted for ${order.orderNumber} → dispatch room`,
+        );
       } catch (err) {
         this.logger.warn(
           `Dispatch alert emit failed for ${orderId} (non-fatal): ${
@@ -370,6 +401,10 @@ export class PaymentsService {
           }`,
         );
       }
+    } else {
+      this.logger.warn(
+        `Dispatch alert: PosGateway not injected — no alert for ${orderId}`,
+      );
     }
   }
 
