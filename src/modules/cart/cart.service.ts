@@ -21,9 +21,12 @@ export interface CartItemView {
   variantName: string | null;
   sku: string;
   quantity: number;
-  /** Snapshot price at time of add. */
+  /** Effective price (wholesale price for wholesale lines, else retail). */
   priceNgn: number;
   priceUsd: number;
+  /** The variant's retail price (for the struck-through subtotal). */
+  retailPriceNgn: number;
+  retailPriceUsd: number;
   /** Current live price from the DB. `null` when the variant has been removed. */
   currentPriceNgn: number | null;
   currentPriceUsd: number | null;
@@ -376,12 +379,23 @@ export class CartService {
     const currentPriceNgn = liveVariant ? Number(liveVariant.retailPriceNgn) : null;
     const currentPriceUsd = liveVariant ? Number(liveVariant.retailPriceUsd) : null;
 
-    const snapshotNgn = Number(row.priceNgn);
-    const snapshotUsd = Number(row.priceUsd);
+    // Retail snapshot stored on the row.
+    const retailNgn = Number(row.priceNgn);
+    const retailUsd = Number(row.priceUsd);
+
+    // Effective price: wholesale lines use the live variant's wholesale price
+    // (so the cart/quote reflect what's actually charged); retail lines use
+    // the snapshot. Falls back to the retail snapshot if the variant is gone.
+    const isWholesale = !!row.isWholesale;
+    const effectiveNgn =
+      isWholesale && liveVariant ? Number(liveVariant.wholesalePriceNgn) : retailNgn;
+    const effectiveUsd =
+      isWholesale && liveVariant ? Number(liveVariant.wholesalePriceUsd) : retailUsd;
 
     const priceChanged =
       variantExists &&
-      (currentPriceNgn !== snapshotNgn || currentPriceUsd !== snapshotUsd);
+      !isWholesale &&
+      (currentPriceNgn !== retailNgn || currentPriceUsd !== retailUsd);
 
     return {
       id: row.id,
@@ -392,15 +406,17 @@ export class CartService {
       variantName: liveVariant?.name ?? row.variantName ?? null,
       sku: liveVariant?.sku ?? row.sku,
       quantity: row.quantity,
-      priceNgn: snapshotNgn,
-      priceUsd: snapshotUsd,
+      priceNgn: effectiveNgn,
+      priceUsd: effectiveUsd,
+      retailPriceNgn: retailNgn,
+      retailPriceUsd: retailUsd,
       currentPriceNgn,
       currentPriceUsd,
       priceChanged,
       unavailable,
       options: (liveVariant?.options ?? row.options) ?? null,
       imageUrl: row.imageUrl ?? null,
-      isWholesale: !!row.isWholesale,
+      isWholesale,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
