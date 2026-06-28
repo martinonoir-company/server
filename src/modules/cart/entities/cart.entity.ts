@@ -17,7 +17,9 @@ import { Product, ProductVariant } from '../../products/entities/product.entity'
  * if admin hard-deletes the variant before the user checks out.
  */
 @Entity('cart_items')
-@Unique('UQ_cart_user_variant', ['userId', 'variantId'])
+// A variant can appear twice in one cart: once retail, once wholesale. The
+// wholesale flag is therefore part of the row identity.
+@Unique('UQ_cart_user_variant', ['userId', 'variantId', 'isWholesale'])
 export class CartItem extends BaseEntity {
   @Index()
   @Column({ type: 'varchar', length: 26 })
@@ -71,4 +73,13 @@ export class CartItem extends BaseEntity {
 
   @Column({ type: 'varchar', length: 500, nullable: true })
   imageUrl?: string | null;
+
+  /**
+   * True when this line is a wholesale purchase: priced at the variant's
+   * wholesale price and subject to the wholesale minimum quantity. Defaults
+   * to false (retail). Part of the row's unique key so retail + wholesale of
+   * the same variant coexist.
+   */
+  @Column({ type: 'boolean', default: false })
+  isWholesale!: boolean;
 }

@@ -33,6 +33,8 @@ export interface CartItemView {
   unavailable: boolean;
   options: Record<string, string> | null;
   imageUrl: string | null;
+  /** true when this is a wholesale line (priced + gated as wholesale). */
+  isWholesale: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -104,6 +106,7 @@ export class CartService {
     userId: string,
     variantId: string,
     quantity: number,
+    isWholesale = false,
   ): Promise<CartItemView> {
     if (!Number.isInteger(quantity) || quantity < 1) {
       throw new BadRequestException('quantity must be a positive integer');
@@ -115,7 +118,10 @@ export class CartService {
 
     const saved = await this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(CartItem);
-      const existing = await repo.findOne({ where: { userId, variantId } });
+      // Retail and wholesale of the same variant are distinct rows.
+      const existing = await repo.findOne({
+        where: { userId, variantId, isWholesale },
+      });
       if (existing) {
         existing.quantity = existing.quantity + quantity;
         // Refresh the snapshot so display stays close to current truth.
@@ -144,6 +150,7 @@ export class CartService {
         priceUsd: Number(variant.retailPriceUsd),
         options: variant.options ?? null,
         imageUrl,
+        isWholesale,
       });
       return repo.save(fresh);
     });
@@ -393,6 +400,7 @@ export class CartService {
       unavailable,
       options: (liveVariant?.options ?? row.options) ?? null,
       imageUrl: row.imageUrl ?? null,
+      isWholesale: !!row.isWholesale,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };

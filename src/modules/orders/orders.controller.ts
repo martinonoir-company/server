@@ -16,6 +16,7 @@ import {
   UpdateOrderStatusDto,
   OrderQueryDto,
   DispatchOrderDto,
+  DispatchScanDto,
   MarkDeliveredDto,
 } from './dto/order.dto';
 import { PricingEngine, QuoteItem, QuoteContext } from './pricing.engine';
@@ -97,6 +98,19 @@ export class OrdersController {
   @Get()
   async findAll(@Query() query: OrderQueryDto) {
     const result = await this.ordersService.findAll(query);
+    return { data: result };
+  }
+
+  // ── Dispatch queue (POS + admin) ──
+  //
+  // Paginated + filterable list of orders that ship from a branch and so
+  // need staff sorting + courier pickup. Same query contract as findAll
+  // (status, dispatchStatus, dates, search, page/limit). Declared before the
+  // `:id` route so "dispatch-queue" isn't swallowed as an id.
+  @Get('dispatch-queue')
+  @RequirePermissions(Permission.ORDERS_READ)
+  async dispatchQueue(@Query() query: OrderQueryDto) {
+    const result = await this.ordersService.findDispatchQueue(query);
     return { data: result };
   }
 
@@ -222,6 +236,28 @@ export class OrdersController {
     @CurrentUser() user?: User,
   ) {
     const order = await this.ordersService.dispatchOrder(id, dto, user?.id);
+    return { data: order };
+  }
+
+  // ── Dispatch scan (POS / scanner) ──
+  //
+  // A staff member scans the order barcode at the branch to acknowledge the
+  // items have been sorted and handed to the AAJ courier. `ref` is the order
+  // id or order number (what the barcode encodes). Flips dispatchStatus
+  // PENDING → DISPATCHED; idempotent. Distinct from POST /:id/dispatch.
+  @Post('dispatch-scan/:ref')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(Permission.ORDERS_UPDATE)
+  async dispatchScan(
+    @Param('ref') ref: string,
+    @Body() dto: DispatchScanDto,
+    @CurrentUser() user?: User,
+  ) {
+    const order = await this.ordersService.markDispatchedByScan(
+      ref,
+      user?.id,
+      dto?.note,
+    );
     return { data: order };
   }
 

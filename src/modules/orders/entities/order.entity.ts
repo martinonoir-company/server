@@ -249,6 +249,34 @@ export class Order extends BaseEntity {
   @Column({ type: 'text', nullable: true })
   shippingLastError?: string;
 
+  // ── Wholesale ──
+  /**
+   * True when the order contains at least one wholesale line. Denormalised
+   * from the items so the admin can filter/aggregate wholesale orders
+   * without joining order_items. Set at checkout from the line flags.
+   */
+  @Index()
+  @Column({ type: 'boolean', default: false })
+  isWholesale!: boolean;
+
+  // ── Dispatch (branch → AAJ pickup sorting) ──
+  /**
+   * Sorting/handoff state for orders that require shipping (not opted out).
+   * NULL for orders that don't need dispatch. PENDING once the order is
+   * payable and awaiting staff sorting; DISPATCHED after a staff member
+   * scans the order barcode to hand it to the AAJ courier.
+   */
+  @Index()
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  dispatchStatus?: 'PENDING' | 'DISPATCHED' | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  dispatchedAt?: Date | null;
+
+  /** Staff user ID who scanned the order as dispatched. */
+  @Column({ type: 'varchar', length: 26, nullable: true })
+  dispatchedBy?: string | null;
+
   // ── Notes ──
   @Column({ type: 'text', nullable: true })
   customerNote?: string;
@@ -308,6 +336,14 @@ export class OrderItem extends BaseEntity {
 
   @Column({ type: 'jsonb', nullable: true })
   options?: Record<string, string>;
+
+  /**
+   * True when this line was purchased at the wholesale price (unitPrice is
+   * the variant's wholesale price, quantity ≥ MIN_WHOLESALE_QTY). Retail
+   * lines are false. Captured at checkout; never recomputed afterwards.
+   */
+  @Column({ type: 'boolean', default: false })
+  isWholesale!: boolean;
 }
 
 // ── Order Status History (audit trail) ──

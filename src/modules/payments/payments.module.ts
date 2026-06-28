@@ -11,6 +11,7 @@ import { Terminal } from '../branches/entities/terminal.entity';
 import { RefundsModule } from '../refunds/refunds.module';
 import { AgentsModule } from '../agents/agents.module';
 import { ShippingModule } from '../shipping/shipping.module';
+import { RealtimeModule } from '../realtime/realtime.module';
 
 @Module({
   imports: [
@@ -23,6 +24,9 @@ import { ShippingModule } from '../shipping/shipping.module';
     // ShippingModule exposes ShippingDispatchService so the order-PAID
     // hook can fire AAJ booking + processing.
     ShippingModule,
+    // RealtimeModule exposes PosGateway so the order-PAID hook can push a
+    // dispatch alert to POS terminals over websocket.
+    RealtimeModule,
   ],
   controllers: [PaymentsController],
   providers: [PaymentsService, MoniepointProvider, PaystackProvider, StripeProvider],

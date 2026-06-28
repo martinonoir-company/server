@@ -32,6 +32,7 @@ import {
 import { Order, OrderStatus } from '../orders/entities/order.entity';
 import { AgentsService } from '../agents/agents.service';
 import { ShippingDispatchService } from '../shipping/shipping-dispatch.service';
+import { PosGateway } from '../realtime/pos.gateway';
 
 /** Input to record/begin a payment row. */
 export interface RecordPaymentInput {
@@ -81,6 +82,10 @@ export class PaymentsService {
     private readonly agentsService?: AgentsService,
     @Optional()
     private readonly shippingDispatchService?: ShippingDispatchService,
+    // Optional so payments still work if realtime isn't wired; the dispatch
+    // alert is best-effort and must never block or fail the payment path.
+    @Optional()
+    private readonly posGateway?: PosGateway,
   ) {
     this.providers = new Map<PaymentProviderName, IPaymentProvider>([
       [PaymentProviderName.MONIEPOINT, moniepoint],
@@ -327,6 +332,44 @@ export class PaymentsService {
             }`,
           ),
         );
+    }
+
+    // Dispatch alert: notify POS terminals about a new paid order that needs
+    // branch sorting + courier pickup. Best-effort and fully isolated — any
+    // failure here is logged and swallowed so it can never affect payment.
+    if (this.posGateway) {
+      try {
+        const order = await this.orderRepo.findOne({
+          where: { id: orderId },
+          relations: ['items'],
+        });
+        if (order && order.dispatchStatus === 'PENDING') {
+          const addr = order.shippingAddress;
+          this.posGateway.emitDispatchNew({
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            channel: order.channel,
+            currency: order.currency,
+            grandTotal: Number(order.grandTotal),
+            itemCount: (order.items ?? []).reduce(
+              (s, i) => s + (i.quantity ?? 0),
+              0,
+            ),
+            customerName: addr
+              ? `${addr.firstName} ${addr.lastName}`.trim()
+              : (order.guestEmail ?? 'Customer'),
+            city: addr?.city,
+            state: addr?.state,
+            createdAt: (order.createdAt ?? new Date()).toISOString(),
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Dispatch alert emit failed for ${orderId} (non-fatal): ${
+            (err as Error).message
+          }`,
+        );
+      }
     }
   }
 

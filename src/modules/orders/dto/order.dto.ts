@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsNumber, IsArray, IsEnum, ValidateNested, Min, MaxLength, IsEmail } from 'class-validator';
+import { IsString, IsOptional, IsNumber, IsArray, IsEnum, IsBoolean, ValidateNested, Min, MaxLength, IsEmail } from 'class-validator';
 import { Type } from 'class-transformer';
 import { OrderStatus, PaymentMethod, OrderChannel } from '../entities/order.entity';
 
@@ -9,6 +9,15 @@ export class CheckoutItemDto {
   @IsNumber()
   @Min(1)
   quantity!: number;
+
+  /**
+   * Customer chose wholesale for this line: priced at the variant's
+   * wholesale price and gated by MIN_WHOLESALE_QTY. The server re-validates
+   * the minimum quantity — the client flag alone is not trusted.
+   */
+  @IsOptional()
+  @IsBoolean()
+  wholesale?: boolean;
 }
 
 export class ShippingAddressDto {
@@ -161,4 +170,23 @@ export class OrderQueryDto {
   @IsOptional() @IsString() endDate?: string;
   /** Search by order number */
   @IsOptional() @IsString() search?: string;
+  /** "true"/"false" — only wholesale orders (any wholesale line). */
+  @IsOptional() @IsString() wholesale?: string;
+  /** Filter by dispatch state for shipping orders: PENDING | DISPATCHED. */
+  @IsOptional() @IsString() dispatchStatus?: string;
+  /** "true" — only orders that require dispatch (shipping, not opted out). */
+  @IsOptional() @IsString() requiresDispatch?: string;
+}
+
+/**
+ * Body for POST /orders/:id/dispatch-scan — a staff member scans the order
+ * barcode at the branch to acknowledge it has been sorted and handed to the
+ * AAJ courier. This is the lightweight "dispatched" acknowledgment, distinct
+ * from the full PROCESSING→SHIPPED courier-handoff flow (POST /orders/:id/dispatch).
+ */
+export class DispatchScanDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
 }

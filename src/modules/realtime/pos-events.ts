@@ -20,6 +20,14 @@ export function branchRoom(branchCode: string): string {
   return `branch:${branchCode.toUpperCase()}`;
 }
 
+/**
+ * Global dispatch room. Every POS terminal joins this room on connect so a
+ * new shipping order anywhere triggers the dispatch alert on all terminals.
+ * Kept global (not per-branch) because storefront/mobile orders have no
+ * branch until staff sort them — any branch may handle the pickup.
+ */
+export const DISPATCH_ROOM = 'dispatch';
+
 /** Events the SERVER emits into a terminal room. */
 export const PosServerEvent = {
   SESSION_OPENED: 'session:opened',
@@ -30,6 +38,8 @@ export const PosServerEvent = {
   PAYMENT_INTENT: 'session:payment-intent',
   CONFIRMED: 'session:confirmed',
   VOIDED: 'session:voided',
+  /** A new paid order that needs branch dispatch (storefront/mobile). */
+  DISPATCH_NEW: 'dispatch:new',
 } as const;
 export type PosServerEvent =
   (typeof PosServerEvent)[keyof typeof PosServerEvent];
@@ -79,4 +89,18 @@ export interface SessionVoidedPayload {
 
 export interface JoinTerminalPayload {
   terminalCode: string;
+}
+
+/** Payload for the dispatch:new alert pushed to all POS terminals. */
+export interface DispatchNewPayload {
+  orderId: string;
+  orderNumber: string;
+  channel: string;
+  currency: string;
+  grandTotal: number;
+  itemCount: number;
+  customerName: string;
+  city?: string;
+  state?: string;
+  createdAt: string;
 }

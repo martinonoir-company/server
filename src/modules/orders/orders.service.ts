@@ -30,6 +30,7 @@ import {
   MarkDeliveredDto,
 } from './dto/order.dto';
 import { withUniqueOrderNumber } from './order-number.util';
+import { MIN_WHOLESALE_QTY } from '../../shared/constants/wholesale';
 
 @Injectable()
 export class OrdersService {
@@ -112,10 +113,29 @@ export class OrdersService {
           }
         }
 
-        // Get correct price based on channel + currency
-        const isWholesale = channel === OrderChannel.POS || channel === OrderChannel.ADMIN;
+        // Wholesale pricing.
+        //
+        // POS/ADMIN channels are inherently wholesale (staff sales) and keep
+        // their existing behaviour. Storefront/mobile lines are wholesale only
+        // when the customer explicitly opted in for that line — and then the
+        // server enforces the minimum quantity (the client flag is not
+        // trusted on its own). A wholesale line is charged the variant's
+        // wholesale price; everything else is retail.
+        const staffChannel =
+          channel === OrderChannel.POS || channel === OrderChannel.ADMIN;
+        const lineWholesale = staffChannel || cartItem.wholesale === true;
+        if (
+          lineWholesale &&
+          !staffChannel &&
+          cartItem.quantity < MIN_WHOLESALE_QTY
+        ) {
+          throw new BadRequestException(
+            `Wholesale orders require a minimum quantity of ${MIN_WHOLESALE_QTY} per item. ` +
+              `"${product.name}${variant.name ? ` — ${variant.name}` : ''}" has only ${cartItem.quantity}.`,
+          );
+        }
         let unitPrice: number;
-        if (isWholesale) {
+        if (lineWholesale) {
           unitPrice = currency === 'USD' ? Number(variant.wholesalePriceUsd) : Number(variant.wholesalePriceNgn);
         } else {
           unitPrice = currency === 'USD' ? Number(variant.retailPriceUsd) : Number(variant.retailPriceNgn);
@@ -132,8 +152,13 @@ export class OrdersService {
           unitPrice,
           lineTotal,
           options: variant.options,
+          isWholesale: lineWholesale,
         });
       }
+
+      // Order-level wholesale flag: any wholesale line marks the order so the
+      // admin can filter/aggregate without joining order_items.
+      const orderIsWholesale = orderItems.some((i) => i.isWholesale);
 
       // 2b. Auto-apply variant-scoped coupons.
       //
@@ -268,6 +293,12 @@ export class OrdersService {
           taxTotal: 0,
           grandTotal: finalGrandTotal,
           shippingOptOut: optOut,
+          isWholesale: orderIsWholesale,
+          // Dispatch sorting applies to orders that actually ship from a
+          // branch (storefront/mobile, not opted out, not POS walk-ups).
+          // PENDING means awaiting staff sort + courier handoff; the POS
+          // dispatch alert fires once the order is PAID.
+          dispatchStatus: !optOut && !isPOSChannel ? 'PENDING' : null,
           shippingQuoteId: shippingQuoteId ?? undefined,
           shippingQuoteExpiresAt: shippingQuoteExpiresAt ?? undefined,
           paymentMethod: dto.paymentMethod,
@@ -601,6 +632,70 @@ export class OrdersService {
   }
 
   /**
+   * Branch dispatch acknowledgment: a staff member scans the order barcode
+   * at the branch to confirm the items have been sorted and handed to the
+   * AAJ courier for pickup. This flips `dispatchStatus` PENDING → DISPATCHED
+   * and stamps who/when. It is intentionally independent of the order FSM
+   * status and of the full courier-handoff flow (dispatchOrder), so it never
+   * interferes with payment, shipping booking, or delivery.
+   *
+   * Idempotent: scanning an already-DISPATCHED order returns it unchanged.
+   * Rejects orders that don't require dispatch (no shipping / opted out).
+   *
+   * `ref` may be an order id (ULID) or an order number (what the barcode
+   * encodes) — both resolve to the same order.
+   */
+  async markDispatchedByScan(
+    ref: string,
+    staffId?: string,
+    note?: string,
+  ): Promise<Order> {
+    const key = ref.trim();
+    const order = await this.orderRepo.findOne({
+      where: [{ id: key }, { orderNumber: key }],
+      relations: ['items'],
+    });
+    if (!order) {
+      throw new NotFoundException(`Order "${ref}" not found`);
+    }
+    if (!order.dispatchStatus) {
+      throw new BadRequestException(
+        `Order ${order.orderNumber} does not require dispatch (no shipping or pickup opted out).`,
+      );
+    }
+    if (order.dispatchStatus === 'DISPATCHED') {
+      return order; // idempotent
+    }
+
+    order.dispatchStatus = 'DISPATCHED';
+    order.dispatchedAt = new Date();
+    order.dispatchedBy = staffId ?? null;
+    if (note) {
+      order.staffNote = order.staffNote
+        ? `${order.staffNote}\n[Dispatch] ${note}`
+        : `[Dispatch] ${note}`;
+    }
+    await this.orderRepo.save(order);
+    this.logger.debug(
+      `Order ${order.orderNumber} marked DISPATCHED by ${staffId ?? 'unknown'}`,
+    );
+    return order;
+  }
+
+  /** Paginated list of orders that need branch dispatch (shipping orders). */
+  async findDispatchQueue(query: OrderQueryDto): Promise<{
+    items: Order[];
+    total: number;
+    page: number;
+    limit: number;
+    pages: number;
+  }> {
+    // Reuse findAll with a forced requiresDispatch filter so the POS/admin
+    // dispatch views share the same pagination + filtering contract.
+    return this.findAll({ ...query, requiresDispatch: 'true' });
+  }
+
+  /**
    * Mark a shipment delivered.
    *
    *  - Order must be in SHIPPED.
@@ -739,6 +834,18 @@ export class OrdersService {
     }
     if (query.search?.trim()) {
       qb.andWhere('order.orderNumber ILIKE :search', { search: `%${query.search.trim()}%` });
+    }
+    if (query.wholesale === 'true') {
+      qb.andWhere('order.isWholesale = true');
+    } else if (query.wholesale === 'false') {
+      qb.andWhere('order.isWholesale = false');
+    }
+    if (query.dispatchStatus) {
+      qb.andWhere('order.dispatchStatus = :ds', { ds: query.dispatchStatus });
+    }
+    if (query.requiresDispatch === 'true') {
+      // Orders that ship from a branch and so need a courier handoff.
+      qb.andWhere('order.dispatchStatus IS NOT NULL');
     }
 
     const sortBy = query.sortBy ?? 'createdAt';

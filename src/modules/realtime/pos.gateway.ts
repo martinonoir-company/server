@@ -12,6 +12,8 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import {
+  DISPATCH_ROOM,
+  DispatchNewPayload,
   JoinTerminalPayload,
   POS_NAMESPACE,
   PosClientEvent,
@@ -103,6 +105,9 @@ export class PosGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // Cache identity on the socket — no per-event verification.
       client.data.userId = payload.sub;
       client.data.role = payload.role;
+      // Every authenticated POS/staff socket joins the global dispatch room
+      // so new-order dispatch alerts reach all terminals immediately.
+      void client.join(DISPATCH_ROOM);
       this.logger.debug(
         `Socket ${client.id} connected (user=${payload.sub} role=${payload.role ?? '?'})`,
       );
@@ -194,6 +199,22 @@ export class PosGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server
       .to(terminalRoom(terminalCode))
       .emit(PosServerEvent.VOIDED, payload);
+  }
+
+  /**
+   * Broadcast a new dispatch order to every connected POS terminal. Safe to
+   * call from anywhere (the OrdersService PAID hook): if the socket server
+   * isn't ready yet it no-ops rather than throwing, so it can never break
+   * the payment path.
+   */
+  emitDispatchNew(payload: DispatchNewPayload): void {
+    try {
+      this.server?.to(DISPATCH_ROOM).emit(PosServerEvent.DISPATCH_NEW, payload);
+    } catch (err) {
+      this.logger.warn(
+        `emitDispatchNew failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   // ── Helpers ──

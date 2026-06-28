@@ -44,6 +44,7 @@ export class CartController {
       user.id,
       dto.variantId,
       dto.quantity,
+      dto.isWholesale ?? false,
     );
     return { data: item };
   }

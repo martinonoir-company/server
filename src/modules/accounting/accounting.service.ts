@@ -195,6 +195,45 @@ export class AccountingService {
   }
 
   /**
+   * Recognised revenue from WHOLESALE orders only (same recognition rule
+   * and window as revenueTotalNgn, restricted to orders.isWholesale). Mirrors
+   * the normal revenue card so the admin accounting page can show wholesale
+   * sales alongside total sales. Returns the revenue plus the order count.
+   */
+  async wholesaleRevenueTotalNgn(
+    from: Date,
+    to: Date,
+  ): Promise<{ amountNgn: number; ordersCount: number }> {
+    const row = await this.orderRepo
+      .createQueryBuilder('o')
+      .select(`COALESCE(SUM(o."grandTotal"), 0)::bigint`, 'total')
+      .addSelect(`COUNT(*)::int`, 'count')
+      .where(`o.currency = :ngn`, { ngn: 'NGN' })
+      .andWhere(`o."isWholesale" = true`)
+      .andWhere(
+        `o.status IN (:...statuses)`,
+        {
+          statuses: [
+            OrderStatus.PAID,
+            OrderStatus.PROCESSING,
+            OrderStatus.SHIPPED,
+            OrderStatus.DELIVERED,
+            OrderStatus.RETURN_REQUESTED,
+            OrderStatus.RETURN_APPROVED,
+            OrderStatus.RETURNED,
+            OrderStatus.REFUNDED,
+          ],
+        },
+      )
+      .andWhere(`o."paidAt" BETWEEN :from AND :to`, { from, to })
+      .getRawOne<{ total: string; count: string }>();
+    return {
+      amountNgn: Number(row?.total ?? 0),
+      ordersCount: Number(row?.count ?? 0),
+    };
+  }
+
+  /**
    * Gross profit for the window. (unitPrice − costPriceNgn) × qty,
    * floored at 0 per line so a mis-tagged cost can't reduce profit.
    * USD orders are excluded because cost-price is stored as NGN only —
@@ -682,6 +721,16 @@ export class AccountingService {
       itemsCount: number;
       requestsCount: number;
     };
+    /**
+     * Wholesale sales card. Recognised revenue from orders flagged
+     * wholesale (subset of grossRevenueNgn), with a net-of-VAT figure and
+     * the order count — mirrors the normal revenue card for the admin page.
+     */
+    wholesale: {
+      grossRevenueNgn: number;
+      netRevenueNgn: number;
+      ordersCount: number;
+    };
     /** Agent commissions are unchanged — they are a settled liability. */
     commissions: { amountNgn: number; ordersCount: number };
     payoutsDisbursed: { amountNgn: number; payoutsCount: number };
@@ -705,6 +754,7 @@ export class AccountingService {
       commissions,
       payoutsDisbursed,
       expenses,
+      wholesaleRaw,
     ] = await Promise.all([
       this.revenueTotalNgn(from, to),
       this.grossProfitNgn(from, to),
@@ -712,6 +762,7 @@ export class AccountingService {
       this.commissionsEarnedNgn(from, to),
       this.payoutsDisbursedNgn(from, to),
       this.expensesTotalNgn(from, to),
+      this.wholesaleRevenueTotalNgn(from, to),
     ]);
 
     const revenueSplit = this.splitVat(grossRevenueNgn);
@@ -748,6 +799,11 @@ export class AccountingService {
         vatAmountNgn: refundsSplit.vatMinor,
         itemsCount: refundsRaw.itemsCount,
         requestsCount: refundsRaw.requestsCount,
+      },
+      wholesale: {
+        grossRevenueNgn: wholesaleRaw.amountNgn,
+        netRevenueNgn: this.splitVat(wholesaleRaw.amountNgn).netMinor,
+        ordersCount: wholesaleRaw.ordersCount,
       },
       commissions,
       payoutsDisbursed,

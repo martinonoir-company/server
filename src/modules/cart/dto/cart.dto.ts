@@ -1,6 +1,8 @@
 import {
   IsString,
   IsInt,
+  IsBoolean,
+  IsOptional,
   Min,
   IsArray,
   ValidateNested,
@@ -19,6 +21,11 @@ export class AddCartItemDto {
   @IsInt()
   @Min(1)
   quantity!: number;
+
+  /** Add as a wholesale line (separate row from a retail line). */
+  @IsOptional()
+  @IsBoolean()
+  isWholesale?: boolean;
 }
 
 export class UpdateCartQuantityDto {
