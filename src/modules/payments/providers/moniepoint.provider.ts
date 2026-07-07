@@ -70,18 +70,40 @@ export interface TerminalStatusResult {
  *   FAILED      — the device or the network rejected the payment.
  *   CANCELLED   — the cashier or customer cancelled on the device.
  *
- * Earlier we mapped PROCESSED → PROCESSING, which left the POS loop
- * polling forever (and the customer staring at a "waiting for terminal"
- * screen) for a transaction the device had already completed. PROCESSED
- * is a terminal-success state for our purposes: the customer paid and
- * left. We map it to SUCCEEDED so the order flips to PAID.
+ * CRITICAL: `processingStatus` alone does NOT mean the payment was
+ * approved. `PROCESSED` means the terminal FINISHED interacting with the
+ * customer (card read, PIN entered, receipt printed) — but the card can
+ * still be DECLINED (e.g. wrong PIN, insufficient funds). Approval is
+ * carried by the ISO-8583 `responseCode`: '00' == approved; anything else
+ * is a decline. So a PROCESSED transaction with responseCode != '00' is a
+ * FAILED payment, and mapping it to SUCCEEDED would flip the order to PAID
+ * for money that never moved.
+ *
+ * We therefore require BOTH a completed processing status AND an approval
+ * response code before returning SUCCEEDED. When the completed status has
+ * a non-approval (or missing) response code we return FAILED. Only fall
+ * through to PENDING while the device is still working (no verdict yet).
  */
-function mapProcessingStatus(s: string | undefined): PaymentIntentStatus {
+const APPROVAL_RESPONSE_CODE = '00';
+
+function isApproved(responseCode: string | undefined): boolean {
+  return (responseCode ?? '').trim() === APPROVAL_RESPONSE_CODE;
+}
+
+function mapProcessingStatus(
+  s: string | undefined,
+  responseCode?: string,
+): PaymentIntentStatus {
   switch (s) {
     case 'SUCCESSFUL':
     case 'COMPLETED':
     case 'PROCESSED':
-      return PaymentIntentStatus.SUCCEEDED;
+      // Completed on the device — but only a '00' response code is an
+      // actual approval. A declined card (wrong PIN, insufficient funds,
+      // etc.) also reports as completed; treat that as FAILED.
+      return isApproved(responseCode)
+        ? PaymentIntentStatus.SUCCEEDED
+        : PaymentIntentStatus.FAILED;
     case 'FAILED':
       return PaymentIntentStatus.FAILED;
     case 'CANCELLED':
@@ -232,8 +254,13 @@ export class MoniepointProvider implements IPaymentProvider {
         merchantReference:
           (data['merchantReference'] as string) ?? input.merchantReference,
         transactionReference: data['transactionReference'] as string,
-        // A freshly pushed transaction is PENDING/QUEUED on the device.
-        status: mapProcessingStatus(data['processingStatus'] as string),
+        // A freshly pushed transaction is PENDING/QUEUED on the device. Pass
+        // responseCode so the same approval gate applies if it ever arrives
+        // already completed.
+        status: mapProcessingStatus(
+          data['processingStatus'] as string,
+          data['responseCode'] as string,
+        ),
         message: data['responseMessage'] as string,
         raw: data,
       };
@@ -314,7 +341,10 @@ export class MoniepointProvider implements IPaymentProvider {
         merchantReference:
           (data['merchantReference'] as string) ?? merchantReference,
         transactionReference: data['transactionReference'] as string,
-        status: mapProcessingStatus(data['processingStatus'] as string),
+        status: mapProcessingStatus(
+          data['processingStatus'] as string,
+          data['responseCode'] as string,
+        ),
         actualAmount,
         responseCode: data['responseCode'] as string,
         responseMessage: data['responseMessage'] as string,
