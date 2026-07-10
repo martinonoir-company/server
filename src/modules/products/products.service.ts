@@ -188,46 +188,77 @@ export class ProductsService {
       return this.searchAll(query, page, limit, skip, cacheKey, ttl);
     }
 
-    const qb = this.productRepo
-      .createQueryBuilder('product')
-      .leftJoinAndSelect('product.variants', 'variant')
-      .leftJoinAndSelect('product.media', 'media')
-      .leftJoinAndSelect('product.category', 'category');
+    // Two-phase, like searchAll(): page over product IDs with no collection
+    // joins, then hydrate. Paginating a query that leftJoinAndSelects
+    // variants+media makes LIMIT slice join-expanded rows rather than
+    // products, so both the page and getManyAndCount()'s total come out short.
+    const sortBy = query.sortBy ?? 'createdAt';
+    const sortOrder = query.sortOrder ?? 'DESC';
+
+    const idQb = this.productRepo.createQueryBuilder('product').select('product.id', 'id');
 
     // Soft-delete visibility
     if (query.withDeleted || query.deletedOnly) {
-      qb.withDeleted();
+      idQb.withDeleted();
     }
     if (query.deletedOnly) {
-      qb.andWhere('product.deletedAt IS NOT NULL');
+      idQb.andWhere('product.deletedAt IS NOT NULL');
     }
 
     if (query.categoryId) {
-      qb.andWhere('product.categoryId = :categoryId', { categoryId: query.categoryId });
+      idQb.andWhere('product.categoryId = :categoryId', { categoryId: query.categoryId });
     }
 
     if (query.isActive !== undefined) {
-      qb.andWhere('product.isActive = :isActive', { isActive: query.isActive });
+      idQb.andWhere('product.isActive = :isActive', { isActive: query.isActive });
     }
 
     if (query.isFeatured !== undefined) {
-      qb.andWhere('product.isFeatured = :isFeatured', { isFeatured: query.isFeatured });
+      idQb.andWhere('product.isFeatured = :isFeatured', { isFeatured: query.isFeatured });
     }
 
-    // Sorting
-    const sortBy = query.sortBy ?? 'createdAt';
-    const sortOrder = query.sortOrder ?? 'DESC';
+    // Count products (no joins → no fan-out), so `total` is stable across limits.
+    const total = await idQb.clone().getCount();
+
+    // Sorting. Price lives on variants, so sort by the product's cheapest
+    // variant via a correlated subquery rather than joining (which would
+    // reintroduce row fan-out).
     if (sortBy === 'retailPriceNgn' || sortBy === 'retailPriceUsd') {
-      qb.addOrderBy(`variant.${sortBy}`, sortOrder);
+      const col = sortBy === 'retailPriceNgn' ? 'retailPriceNgn' : 'retailPriceUsd';
+      idQb
+        .addSelect(
+          `(SELECT MIN(v."${col}") FROM product_variants v WHERE v."productId" = product.id)`,
+          'sort_price',
+        )
+        .orderBy('sort_price', sortOrder, 'NULLS LAST');
     } else {
-      qb.addOrderBy(`product.${sortBy}`, sortOrder);
+      idQb.orderBy(`product.${sortBy}`, sortOrder);
     }
+    // Deterministic tiebreaker so pages never overlap or skip rows.
+    idQb.addOrderBy('product.id', 'ASC');
 
-    qb.addOrderBy('media.sortOrder', 'ASC');
-    qb.addOrderBy('variant.sortOrder', 'ASC');
-    qb.skip(skip).take(limit);
+    const pageRows = await idQb.offset(skip).limit(limit).getRawMany<{ id: string }>();
+    const pageIds = pageRows.map((r) => r.id);
 
-    const [items, total] = await qb.getManyAndCount();
+    let items: Product[] = [];
+    if (pageIds.length > 0) {
+      const hydrateQb = this.productRepo
+        .createQueryBuilder('product')
+        .leftJoinAndSelect('product.variants', 'variant')
+        .leftJoinAndSelect('product.media', 'media')
+        .leftJoinAndSelect('product.category', 'category')
+        .where('product.id IN (:...ids)', { ids: pageIds })
+        .addOrderBy('media.sortOrder', 'ASC')
+        .addOrderBy('variant.sortOrder', 'ASC');
+
+      if (query.withDeleted || query.deletedOnly) hydrateQb.withDeleted();
+
+      // Hydration has no LIMIT, so the joined ORDER BY is safe here. Restore
+      // the ranked page order, which IN (...) does not preserve.
+      const rows = await hydrateQb.getMany();
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      items = pageIds.map((id) => byId.get(id)).filter((p): p is Product => !!p);
+    }
 
     // Public/storefront view: hide inactive variants so they can't be added
     // to cart. The admin "show everything" view (withDeleted/deletedOnly)
