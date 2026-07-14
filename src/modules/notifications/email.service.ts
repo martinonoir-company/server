@@ -291,15 +291,27 @@ ${content}
 
   // ── Template: Password Reset ──
 
-  async sendPasswordReset(to: string, resetToken: string, expiresInMinutes: number): Promise<EmailResult> {
-    const resetUrl = `${process.env['FRONTEND_URL'] ?? 'http://localhost:3000'}/reset-password?token=${resetToken}`;
+  /**
+   * `resetPath` selects which portal the link lands on: customers reset at
+   * /reset-password, marketing agents at /agent/reset-password. The token
+   * itself is portal-agnostic, but the endpoint that redeems it enforces the
+   * account's role, so a link can only be used in the portal it was issued for.
+   */
+  async sendPasswordReset(
+    to: string,
+    resetToken: string,
+    expiresInMinutes: number,
+    resetPath: string = '/reset-password',
+    portalLabel: string = 'Martino Noir account',
+  ): Promise<EmailResult> {
+    const resetUrl = `${process.env['FRONTEND_URL'] ?? 'http://localhost:3000'}${resetPath}?token=${resetToken}`;
     const content = `
       <div style="text-align:center;margin-bottom:24px;">
         <div style="width:56px;height:56px;background:#EEF4FC;border-radius:50%;margin:0 auto 16px;line-height:56px;font-size:28px;">🔐</div>
         <h1 style="margin:0;font-size:24px;color:#0a0a0a;">Reset Your Password</h1>
       </div>
       <p style="color:#1F2933;font-size:14px;line-height:1.6;">
-        You requested a password reset for your Martino Noir account. Click the button below to set a new password:
+        You requested a password reset for your ${portalLabel}. Click the button below to set a new password:
       </p>
       <div style="text-align:center;margin:32px 0;">
         <a href="${resetUrl}" style="display:inline-block;background:#0B3D91;color:#fff;padding:14px 40px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;">Reset Password</a>

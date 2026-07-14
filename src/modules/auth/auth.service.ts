@@ -10,7 +10,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import * as argon2 from 'argon2';
 import * as crypto from 'crypto';
 import { generateSecret as otpGenerateSecret, generateSync as otpGenerateSync, verifySync as otpVerifySync, generateURI as otpGenerateURI } from 'otplib';
@@ -296,9 +296,34 @@ export class AuthService {
   // PASSWORD RESET
   // ─────────────────────────────────────────────────────────────
 
-  async forgotPassword(dto: ForgotPasswordDto): Promise<void> {
+  /**
+   * The customer/staff storefront and the marketing-agent portal share this
+   * one reset-token implementation, because an agent IS a User row carrying
+   * role=MARKETING_AGENT. `scope` is what keeps the two flows from colliding:
+   *
+   *  - forgotPassword only mails a link for an account whose role the calling
+   *    portal owns, so /auth (customers, staff, admins) never mints a link for
+   *    an agent and /agents never mints one for a non-agent. A miss stays a
+   *    silent 200 — no account enumeration.
+   *  - resetPassword refuses a token whose owner's role the portal does not
+   *    own, so a link issued by one portal cannot be redeemed in the other
+   *    even though both read the same password_reset_tokens table.
+   *
+   * Roles are matched with an explicit allow-list rather than a single role so
+   * that /auth keeps serving CUSTOMER, COMPANY_STAFF and both admin roles.
+   */
+  async forgotPassword(
+    dto: ForgotPasswordDto,
+    scope?: {
+      roles: UserRole[];
+      resetPath: string;
+      portalLabel: string;
+    },
+  ): Promise<void> {
     const user = await this.userRepo.findOne({
-      where: { email: dto.email.toLowerCase() },
+      where: scope
+        ? { email: dto.email.toLowerCase().trim(), role: In(scope.roles) }
+        : { email: dto.email.toLowerCase().trim() },
     });
 
     // Always return 200 — never reveal if email exists
@@ -328,10 +353,15 @@ export class AuthService {
       user.email,
       rawToken,
       this.PASSWORD_RESET_EXPIRY_MINUTES,
+      scope?.resetPath,
+      scope?.portalLabel,
     );
   }
 
-  async resetPassword(dto: ResetPasswordDto): Promise<void> {
+  async resetPassword(
+    dto: ResetPasswordDto,
+    scope?: { roles: UserRole[] },
+  ): Promise<void> {
     const tokenHash = this.hashToken(dto.token);
 
     const record = await this.prtRepo.findOne({
@@ -347,6 +377,12 @@ export class AuthService {
     }
     if (record.isExpired) {
       throw new BadRequestException('Reset link expired — request a new one');
+    }
+    // A token minted by the other portal must not be redeemable here. Same
+    // generic message as an unknown token, so this can't be used to probe
+    // which portal an email belongs to.
+    if (scope && (!record.user || !scope.roles.includes(record.user.role))) {
+      throw new BadRequestException('Invalid or expired reset link');
     }
 
     const passwordHash = await argon2.hash(dto.newPassword, ARGON2_OPTIONS);

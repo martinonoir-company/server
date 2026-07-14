@@ -25,8 +25,27 @@ import {
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { CurrentUser } from '../../shared/decorators/current-user.decorator';
 import { Public } from '../../shared/decorators/public.decorator';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { Request } from 'express';
+
+/**
+ * Password reset here covers every portal EXCEPT the marketing-agent one:
+ * customers (storefront + mobile) and staff/admins (admin frontend) all reset
+ * through /auth. Agents have their own portal and reset via /agents, so they
+ * are deliberately excluded — that keeps the reset link they receive pointing
+ * at /agent/reset-password and prevents either portal from redeeming the
+ * other's token. See AuthService.forgotPassword.
+ */
+const NON_AGENT_RESET_SCOPE = {
+  roles: [
+    UserRole.CUSTOMER,
+    UserRole.COMPANY_STAFF,
+    UserRole.COMPANY_SUPER_ADMIN,
+    UserRole.SUPER_ADMIN,
+  ],
+  resetPath: '/reset-password',
+  portalLabel: 'Martino Noir account',
+};
 
 @Controller({ path: 'auth', version: '1' })
 export class AuthController {
@@ -99,7 +118,7 @@ export class AuthController {
   async forgotPassword(
     @Body() dto: ForgotPasswordDto,
   ): Promise<{ message: string }> {
-    await this.authService.forgotPassword(dto);
+    await this.authService.forgotPassword(dto, NON_AGENT_RESET_SCOPE);
     return {
       message:
         'If an account with that email exists, a reset link has been sent.',
@@ -114,7 +133,9 @@ export class AuthController {
   async resetPassword(
     @Body() dto: ResetPasswordDto,
   ): Promise<{ message: string }> {
-    await this.authService.resetPassword(dto);
+    await this.authService.resetPassword(dto, {
+      roles: NON_AGENT_RESET_SCOPE.roles,
+    });
     return { message: 'Password reset successfully. Please log in.' };
   }
 

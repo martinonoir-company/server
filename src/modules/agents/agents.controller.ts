@@ -6,7 +6,10 @@ import {
   Param,
   Query,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import {
   IsEmail,
   IsInt,
@@ -22,11 +25,29 @@ import { Public } from '../../shared/decorators/public.decorator';
 import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
 import { Permission } from '../users/entities/role.entity';
 import { CurrentUser } from '../../shared/decorators/current-user.decorator';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { AgentsService } from './agents.service';
 import { AgentStatus } from './entities/marketing-agent.entity';
 import { AuthService } from '../auth/auth.service';
+import {
+  ForgotPasswordDto,
+  ResetPasswordDto,
+} from '../auth/dto/auth.dto';
 import { PaystackProvider } from '../payments/providers/paystack.provider';
+
+/**
+ * Password reset for the marketing-agent portal. Agents are User rows with
+ * role=MARKETING_AGENT, so they share the password_reset_tokens table with
+ * customers and staff. Restricting both the lookup and the redemption to this
+ * role is what keeps the agent flow from colliding with /auth's: the link is
+ * mailed only for agent accounts, points at the agent reset page, and cannot
+ * be redeemed by the customer/staff endpoint.
+ */
+const AGENT_RESET_SCOPE = {
+  roles: [UserRole.MARKETING_AGENT],
+  resetPath: '/agent/reset-password',
+  portalLabel: 'Martino Noir agent account',
+};
 
 // ── DTOs ──
 
@@ -135,6 +156,45 @@ export class AgentsController {
           role: user.role,
         },
       },
+    };
+  }
+
+  /**
+   * Agent "forgot password". Separate from /auth/forgot-password so the two
+   * portals never collide: this only ever resolves a MARKETING_AGENT account,
+   * and the emailed link points at /agent/reset-password rather than the
+   * customer page. A non-agent email (or no account at all) is a silent 200 —
+   * same as the customer flow, so neither reveals which emails exist.
+   */
+  @Public()
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 3, ttl: 600000 } })
+  async forgotPassword(@Body() dto: ForgotPasswordDto) {
+    await this.authService.forgotPassword(dto, AGENT_RESET_SCOPE);
+    return {
+      data: {
+        message:
+          'If an agent account with that email exists, a reset link has been sent.',
+      },
+    };
+  }
+
+  /**
+   * Redeem an agent reset token. Scoped to MARKETING_AGENT, so a token minted
+   * by the customer/staff portal cannot be spent here (and vice-versa) even
+   * though both portals share the password_reset_tokens table.
+   */
+  @Public()
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 600000 } })
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    await this.authService.resetPassword(dto, {
+      roles: AGENT_RESET_SCOPE.roles,
+    });
+    return {
+      data: { message: 'Password reset successfully. Please sign in.' },
     };
   }
 
