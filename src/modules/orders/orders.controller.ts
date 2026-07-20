@@ -9,6 +9,7 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service';
 import {
@@ -192,8 +193,20 @@ export class OrdersController {
   // PII, payment data, or line items.
   @Public()
   @Get('public/track/:orderNumber')
-  async publicTracking(@Param('orderNumber') orderNumber: string) {
-    const order = await this.ordersService.findByOrderNumber(orderNumber);
+  async publicTracking(
+    @Param('orderNumber') orderNumber: string,
+    @Query('email') email?: string,
+  ) {
+    // Require the order's email so a stranger can't read a shipment just by
+    // guessing an order number. A missing/blank email is a client error; a
+    // wrong one yields the same 404 as an unknown order (no enumeration).
+    if (!email || !email.trim()) {
+      throw new BadRequestException('Email is required to track an order.');
+    }
+    const order = await this.ordersService.findByOrderNumberAndEmail(
+      orderNumber,
+      email,
+    );
     const data = await this.shippingDispatch.getTracking(order.id);
     return {
       data: {

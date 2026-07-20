@@ -885,6 +885,34 @@ export class OrdersService {
     return order;
   }
 
+  /**
+   * Public order lookup for the guest "track my order" flow. Requires BOTH the
+   * order number AND the email the order was placed with, so a stranger who
+   * guesses or enumerates order numbers cannot read someone else's shipment.
+   *
+   * A wrong email throws the SAME NotFound as a wrong order number, so the
+   * response never reveals whether a given order number exists.
+   */
+  async findByOrderNumberAndEmail(
+    orderNumber: string,
+    email: string,
+  ): Promise<Order> {
+    const order = await this.orderRepo.findOne({
+      where: { orderNumber },
+      relations: ['items', 'statusHistory'],
+    });
+    // Same generic failure for "no such order" and "email doesn't match".
+    if (!order) throw new NotFoundException('Order not found');
+    const orderEmail = await this.resolveOrderEmail(order);
+    if (
+      !orderEmail ||
+      orderEmail.trim().toLowerCase() !== email.trim().toLowerCase()
+    ) {
+      throw new NotFoundException('Order not found');
+    }
+    return order;
+  }
+
   // ── Email Helpers ──
 
   private async sendOrderEmail(order: Order): Promise<void> {
