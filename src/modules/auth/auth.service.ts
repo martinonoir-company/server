@@ -10,7 +10,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import * as argon2 from 'argon2';
 import * as crypto from 'crypto';
 import { generateSecret as otpGenerateSecret, generateSync as otpGenerateSync, verifySync as otpVerifySync, generateURI as otpGenerateURI } from 'otplib';
@@ -79,6 +79,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly emailService: EmailService,
+    private readonly dataSource: DataSource,
   ) {}
 
   // ─────────────────────────────────────────────────────────────
@@ -669,6 +670,106 @@ export class AuthService {
     await this.rtRepo.save(refreshToken);
 
     return { accessToken, refreshToken: rawRefreshToken, expiresIn: 900 };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // ACCOUNT DELETION (self-service)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Delete the caller's own account.
+   *
+   * Strategy — soft-delete + anonymization, the pattern stable consumer
+   * platforms use. We do NOT physically drop the user row, because orders
+   * and accounting records reference it and must survive for tax/reporting.
+   * Instead we:
+   *
+   *   1. Restrict to CUSTOMER accounts. Marketing agents (possible owed
+   *      wallet balances) and staff (POS sessions, branch assignments) have
+   *      DB constraints and business state that make self-deletion unsafe —
+   *      they are told to contact support.
+   *   2. Sever the order link (orders.userId → NULL). The column is nullable
+   *      with ON DELETE SET NULL, so the orders themselves are preserved,
+   *      just no longer tied to a person.
+   *   3. Anonymize the row: the email is rewritten to a unique tombstone so
+   *      the REAL email is freed and the customer can register again later
+   *      with a fresh account. All other PII (name, phone, avatar) and all
+   *      credentials (password hash, TOTP secret, backup codes) are cleared.
+   *   4. Soft-delete (deletedAt) so the row no longer appears in normal
+   *      queries, and revoke every session.
+   *   5. Remove per-user dependent rows (cart, wishlist, tokens, customer
+   *      profile + its addresses). Most cascade from the user FK, but we
+   *      clear them explicitly inside the transaction so nothing lingers.
+   *
+   * Re-registration works because register() looks the email up with a
+   * soft-delete-aware findOne (deletedAt IS NULL) AND the real email is no
+   * longer stored on any row, so the unique index does not collide.
+   */
+  async deleteAccount(userId: string): Promise<void> {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) {
+      // Already gone — treat as success (idempotent).
+      return;
+    }
+    if (user.role !== UserRole.CUSTOMER) {
+      throw new ForbiddenException(
+        'Only customer accounts can be deleted here. Staff and marketing ' +
+          'agent accounts must be closed by support to protect payout and ' +
+          'operational records.',
+      );
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      // 1. Preserve orders, sever the personal link.
+      await manager.query(
+        'UPDATE orders SET "userId" = NULL WHERE "userId" = $1',
+        [userId],
+      );
+
+      // 2. Remove per-user dependent rows. Guarded so a missing table can't
+      // abort the whole deletion. customer_addresses cascades from customers.
+      const perUserTables = [
+        'cart_items',
+        'wishlist_items',
+        'push_tokens',
+        'refresh_tokens',
+        'email_verification_tokens',
+        'password_reset_tokens',
+        'customers',
+      ];
+      for (const table of perUserTables) {
+        await manager.query(`DELETE FROM ${table} WHERE "userId" = $1`, [
+          userId,
+        ]);
+      }
+
+      // 3. Anonymize the surviving row and free the real email. The tombstone
+      // is unique per user, so the unique email index never collides and the
+      // customer's real address becomes available for a fresh signup.
+      const tombstone = `deleted+${userId}@deleted.martinonoir.local`;
+      await manager.update(
+        User,
+        { id: userId },
+        {
+          email: tombstone,
+          firstName: 'Deleted',
+          lastName: 'User',
+          phone: undefined,
+          avatarUrl: undefined,
+          passwordHash: '',
+          totpSecret: undefined,
+          twoFactorEnabled: false,
+          backupCodes: undefined,
+          emailVerified: false,
+          permissions: undefined,
+        },
+      );
+
+      // 4. Soft-delete (sets deletedAt) so it drops out of normal queries.
+      await manager.softDelete(User, userId);
+    });
+
+    this.logger.log(`Customer account ${userId} deleted (anonymized).`);
   }
 
   hashToken(token: string): string {

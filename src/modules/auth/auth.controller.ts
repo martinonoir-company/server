@@ -110,6 +110,19 @@ export class AuthController {
     await this.authService.logoutAll(user.id);
   }
 
+  // ── Delete own account (requires JWT) ──
+  //
+  // Self-service account deletion for customers. Anonymizes the user and
+  // frees the email for future re-registration while preserving order and
+  // accounting records. Staff / marketing-agent accounts are refused (403)
+  // and must be closed by support. See AuthService.deleteAccount.
+  @UseGuards(JwtAuthGuard)
+  @Delete('account')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deleteAccount(@CurrentUser() user: User): Promise<void> {
+    await this.authService.deleteAccount(user.id);
+  }
+
   // ── Forgot password — 3 per 10 min ──
   @Public()
   @Post('forgot-password')
