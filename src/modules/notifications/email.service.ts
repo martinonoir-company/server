@@ -49,7 +49,10 @@ export class EmailService {
     this.refreshToken = process.env['ZOHO_MAIL_REFRESH_TOKEN'] ?? '';
     this.region = process.env['ZOHO_MAIL_REGION'] ?? 'com';
     this.fromAddress = process.env['SMTP_FROM'] ?? 'noreply@martinonoir.com';
-    this.logoUrl = `${process.env['FRONTEND_URL'] ?? 'http://localhost:3000'}/images/martino_logo.png`;
+    // Email clients need a publicly resolvable URL (never localhost) and the
+    // pre-inverted white asset: Gmail strips CSS filters, so the black logo
+    // would be invisible on the dark header.
+    this.logoUrl = `${process.env['EMAIL_ASSET_BASE_URL'] ?? 'https://martinonoir.com'}/images/martino_logo_white.png`;
 
     this.isConfigured = !!(this.accountId && this.clientId && this.clientSecret && this.refreshToken);
     if (this.isConfigured) {
@@ -157,7 +160,7 @@ export class EmailService {
 <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px;width:100%;">
 <!-- Header -->
 <tr><td style="background:#0a0a0a;padding:28px 32px;border-radius:12px 12px 0 0;text-align:center;">
-<img src="${this.logoUrl}" alt="Martino Noir" width="140" height="auto" style="display:block;margin:0 auto;max-width:140px;filter:invert(1);"/>
+<img src="${this.logoUrl}" alt="Martino Noir" width="140" height="auto" style="display:block;margin:0 auto;max-width:140px;"/>
 </td></tr>
 <!-- Content -->
 <tr><td style="background:#ffffff;padding:32px;border-left:1px solid #e4e7eb;border-right:1px solid #e4e7eb;">
