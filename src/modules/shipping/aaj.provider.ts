@@ -169,6 +169,8 @@ export class AajProvider {
   private readonly isLive: boolean;
   private readonly defaultCategoryId: string;
   private readonly accountNumber: string;
+  /** AAJ predefined package/box id; every package must carry dimensions. */
+  private readonly predefinedDimensionId: string;
   /** WALLET | CREDIT_FACILITY — picked by deployment. */
   private readonly paymentMethod: 'WALLET' | 'CREDIT_FACILITY';
 
@@ -181,6 +183,8 @@ export class AajProvider {
     this.isLive = !!this.apiKey;
     this.defaultCategoryId = process.env['AAJ_DEFAULT_CATEGORY_ID'] ?? '';
     this.accountNumber = process.env['AAJ_ACCOUNT_NUMBER'] ?? '';
+    this.predefinedDimensionId =
+      process.env['AAJ_PREDEFINED_DIMENSION_ID'] ?? '';
     this.paymentMethod =
       (process.env['AAJ_PAYMENT_METHOD'] as 'WALLET' | 'CREDIT_FACILITY') ??
       'WALLET';
@@ -189,12 +193,40 @@ export class AajProvider {
       this.logger.warn(
         'AAJ_API_KEY not set — running in stub mode (no real bookings).',
       );
-    } else if (!this.defaultCategoryId || !this.accountNumber) {
-      this.logger.warn(
-        'AAJ_DEFAULT_CATEGORY_ID and/or AAJ_ACCOUNT_NUMBER missing. ' +
-          'Live calls will likely 400 on create-booking.',
-      );
+    } else {
+      if (!this.defaultCategoryId || !this.accountNumber) {
+        this.logger.warn(
+          'AAJ_DEFAULT_CATEGORY_ID and/or AAJ_ACCOUNT_NUMBER missing. ' +
+            'Live calls will likely 400 on create-booking.',
+        );
+      }
+      if (!this.predefinedDimensionId) {
+        this.logger.warn(
+          'AAJ_PREDEFINED_DIMENSION_ID not set — AAJ rejects packages with ' +
+            'no dimensions ("predefinedDimension ID or packageDimension data").',
+        );
+      }
     }
+  }
+
+  /**
+   * AAJ requires phone numbers in E.164 (e.g. +2348012345678). Customer and
+   * branch numbers are often stored in local format (08012345678) or with a
+   * bare country code, so normalize before sending. Defaults unknown numbers
+   * to a Nigerian (+234) country code.
+   */
+  private toE164(phone: string | undefined | null): string {
+    const raw = (phone ?? '').trim();
+    if (!raw) return '';
+    if (raw.startsWith('+')) {
+      // Already E.164-ish: keep leading +, strip any other non-digits.
+      return '+' + raw.slice(1).replace(/\D/g, '');
+    }
+    let digits = raw.replace(/\D/g, '');
+    if (digits.startsWith('00')) return '+' + digits.slice(2); // 00234… → +234…
+    if (digits.startsWith('0')) digits = digits.slice(1); // local 080… → 80…
+    if (digits.startsWith('234')) return '+' + digits; // already has NG code
+    return '+234' + digits; // assume Nigerian national number
   }
 
   // ── 1. Quote ────────────────────────────────────────────────
@@ -266,6 +298,9 @@ export class AajProvider {
         packages: [
           {
             actualWeight: Math.max(0.1, input.weightKg),
+            ...(this.predefinedDimensionId
+              ? { predefinedDimension: this.predefinedDimensionId }
+              : {}),
             ...(input.items
               ? {
                   items: input.items.map((i) => ({
@@ -382,7 +417,7 @@ export class AajProvider {
       sender: {
         contact: {
           name: input.sender.name,
-          phone: input.sender.phone,
+          phone: this.toE164(input.sender.phone),
           email: input.sender.email,
           ...(input.sender.company ? { company: input.sender.company } : {}),
         },
@@ -391,7 +426,7 @@ export class AajProvider {
       receiver: {
         contact: {
           name: input.receiver.name,
-          phone: input.receiver.phone,
+          phone: this.toE164(input.receiver.phone),
           email: input.receiver.email,
           ...(input.receiver.company
             ? { company: input.receiver.company }
@@ -407,6 +442,11 @@ export class AajProvider {
           {
             unitMeasurement: 'KGS',
             actualWeight: Math.max(0.1, input.weightKg),
+            // AAJ requires either a predefinedDimension id or explicit
+            // packageDimension; without it create-booking fails validation.
+            ...(this.predefinedDimensionId
+              ? { predefinedDimension: this.predefinedDimensionId }
+              : {}),
             items: input.items.map((i) => ({
               name: i.name,
               quantity: i.quantity,
@@ -702,8 +742,17 @@ export class AajProvider {
           (parsed as { message?: string })?.message ??
           (parsed as { error?: string })?.error ??
           `AAJ ${method} ${path} → ${res.status}`;
+        // Include a snippet of the raw body: AAJ's app errors carry a JSON
+        // message, but upstream 502/503/504 come from their load balancer as
+        // HTML with none — logging the body makes that distinction obvious.
+        const bodySnippet = (
+          typeof parsed === 'string' ? parsed : JSON.stringify(parsed)
+        ).slice(0, 500);
+        const upstream = res.status >= 502 && res.status <= 504;
         this.logger.warn(
-          `AAJ ${method} ${path} failed (${res.status}): ${message}`,
+          `AAJ ${method} ${path} failed (${res.status})${
+            upstream ? ' [upstream/service-unavailable]' : ''
+          }: ${message} | body: ${bodySnippet}`,
         );
         return { ok: false, error: message, statusCode: res.status, raw: parsed };
       }
