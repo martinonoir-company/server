@@ -5,7 +5,7 @@ import { Permission } from '../../modules/users/entities/role.entity';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Role } from '../../modules/users/entities/role.entity';
+import { Role, SYSTEM_ROLES } from '../../modules/users/entities/role.entity';
 import { UserRole } from '../../modules/users/entities/user.entity';
 
 /**
@@ -66,10 +66,19 @@ export class RolesGuard implements CanActivate {
     } else {
       const roleName = this.mapUserRoleToRoleName(user.role);
       const role = await this.roleRepo.findOne({ where: { name: roleName } });
-      if (!role) {
-        throw new ForbiddenException('Role not configured');
+      if (role) {
+        effectivePermissions = role.permissions;
+      } else {
+        // The DB `roles` table may not have been seeded in this environment
+        // (e.g. only MARKETING_AGENT present). Rather than 403 a legitimate
+        // staff member with "Role not configured", fall back to the canonical
+        // in-code definition, which is the source of truth for system roles.
+        const systemRole = SYSTEM_ROLES.find((r) => r.name === roleName);
+        if (!systemRole) {
+          throw new ForbiddenException('Role not configured');
+        }
+        effectivePermissions = systemRole.permissions;
       }
-      effectivePermissions = role.permissions;
     }
 
     // 6. Check ALL required permissions (AND logic)
