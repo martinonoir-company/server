@@ -479,10 +479,15 @@ export class ProductsService {
     const qb = this.variantRepo
       .createQueryBuilder('v')
       .innerJoin('products', 'p', 'p.id = v."productId" AND p."deletedAt" IS NULL AND p."isActive" = true')
+      // Match media that is EITHER specific to the scanned variant OR
+      // product-level (variantId IS NULL). The ORDER BY below then prefers
+      // the variant's own image, falling back to a product image only when
+      // the variant has none. Without the variantId condition this returned
+      // the first product image even when the variant had its own.
       .leftJoin(
         'product_media',
         'm',
-        'm."productId" = p.id AND m."deletedAt" IS NULL',
+        'm."productId" = p.id AND m."deletedAt" IS NULL AND (m."variantId" = v.id OR m."variantId" IS NULL)',
       )
       .where('v."deletedAt" IS NULL')
       .andWhere('v."isActive" = true');
@@ -511,7 +516,9 @@ export class ProductsService {
       'p.slug            AS "productSlug"',
       'm.url             AS "imageUrl"',
     ])
-      .orderBy('m."sortOrder"', 'ASC')
+      // Prefer the variant's own image; fall back to product-level media.
+      .orderBy('CASE WHEN m."variantId" = v.id THEN 0 ELSE 1 END', 'ASC')
+      .addOrderBy('m."sortOrder"', 'ASC')
       .addOrderBy('m."createdAt"', 'ASC')
       .limit(1);
 
