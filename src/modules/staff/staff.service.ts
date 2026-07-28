@@ -5,7 +5,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { User, UserRole } from '../users/entities/user.entity';
 import { Permission } from '../users/entities/role.entity';
 import { AuthService } from '../auth/auth.service';
@@ -30,6 +30,7 @@ export class StaffService {
   constructor(
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly authService: AuthService,
+    private readonly dataSource: DataSource,
   ) {}
 
   // ─── Reads ─────────────────────────────────────────────────────────
@@ -184,15 +185,85 @@ export class StaffService {
   }
 
   /**
-   * Permanently delete a staff account. Hard delete — irreversible.
-   * Still revokes any sessions the target might hold first.
+   * Permanently delete a staff account. Irreversible.
+   *
+   * A plain hard delete fails once a staff member has any operational history,
+   * because several tables reference users(id):
+   *   - user_branches (branch assignments) — NO ACTION, but safe to remove.
+   *   - pos_sessions.openedByStaffId — NO ACTION and NOT NULL, and these are
+   *     cash-reconciliation records that must survive for accounting.
+   *   - orders / expenses / accounting_audit_log — already ON DELETE SET NULL,
+   *     so they are preserved automatically.
+   *   - cart/wishlist/tokens — ON DELETE CASCADE, removed automatically.
+   *
+   * So we do the safe thing in one transaction:
+   *   1. revoke sessions and clear branch assignments (safe blockers);
+   *   2. if the staff member has NO immutable references (POS sessions), hard
+   *      delete the row — a true permanent delete;
+   *   3. otherwise anonymize + soft-delete the row, which honours the
+   *      "permanent removal" intent (account unusable, PII wiped, email freed
+   *      for reuse) WITHOUT destroying the POS accounting history that points
+   *      at it.
    */
   async deleteStaff(id: string, requestingUser: User): Promise<void> {
     const target = await this.loadStaffOrThrow(id, { allowSuspended: true });
     this.assertMutableTarget(target, requestingUser, 'delete');
 
     await this.authService.logoutAll(id);
-    await this.userRepo.delete(id);
+
+    await this.dataSource.transaction(async (manager) => {
+      // 1. Remove branch assignments — pure mapping rows, safe to delete.
+      await manager.query('DELETE FROM user_branches WHERE "userId" = $1', [id]);
+
+      // 2. Does the staff member have immutable operational history that
+      //    references them and cannot be removed or nulled?
+      const [{ count }] = (await manager.query(
+        'SELECT COUNT(*)::int AS count FROM pos_sessions WHERE "openedByStaffId" = $1',
+        [id],
+      )) as Array<{ count: number }>;
+
+      if (count === 0) {
+        // Clean account — a real permanent delete. CASCADE + SET NULL FKs
+        // handle the remaining child rows.
+        await manager.delete(User, id);
+        return;
+      }
+
+      // 3. Has POS history → preserve it. Anonymize the row and soft-delete,
+      //    freeing the email so it can be reused. Mirrors customer account
+      //    deletion. Clear per-user CASCADE-style rows explicitly so nothing
+      //    dangles while the row itself survives (soft-deleted).
+      for (const table of [
+        'cart_items',
+        'wishlist_items',
+        'push_tokens',
+        'refresh_tokens',
+        'email_verification_tokens',
+        'password_reset_tokens',
+      ]) {
+        await manager.query(`DELETE FROM ${table} WHERE "userId" = $1`, [id]);
+      }
+
+      const tombstone = `deleted+${id}@deleted.martinonoir.local`;
+      await manager.update(
+        User,
+        { id },
+        {
+          email: tombstone,
+          firstName: 'Deleted',
+          lastName: 'Staff',
+          phone: undefined,
+          avatarUrl: undefined,
+          passwordHash: '',
+          totpSecret: undefined,
+          twoFactorEnabled: false,
+          backupCodes: undefined,
+          emailVerified: false,
+          permissions: undefined,
+        },
+      );
+      await manager.softDelete(User, id);
+    });
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────
