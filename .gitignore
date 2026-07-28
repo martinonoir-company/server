@@ -1,5 +1,8 @@
-# compiled output
-/dist
+# Compiled output is committed intentionally: the production server (AWS)
+# runs `node dist/main.js` directly instead of building on the box, because
+# building there exhausts memory. Always run `npm run build` locally and
+# commit the updated dist/ before pushing.
+# /dist  — deliberately NOT ignored
 /node_modules
 
 # Logs

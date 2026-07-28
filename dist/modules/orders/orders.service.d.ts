@@ -1,0 +1,58 @@
+import { Repository, DataSource } from 'typeorm';
+import { Order, OrderItem, OrderStatusHistory } from './entities/order.entity';
+import { ProductVariant } from '../products/entities/product.entity';
+import { Product } from '../products/entities/product.entity';
+import { InventoryService } from '../inventory/inventory.service';
+import { CartService } from '../cart/cart.service';
+import { ShippingService } from '../shipping/shipping.service';
+import { CouponsService } from '../coupons/coupons.service';
+import { EmailService } from '../notifications/email.service';
+import { PushService } from '../notifications/push.service';
+import { User } from '../users/entities/user.entity';
+import { CreateOrderDto, UpdateOrderStatusDto, OrderQueryDto, DispatchOrderDto, MarkDeliveredDto } from './dto/order.dto';
+import { SettingsService } from '../settings/settings.service';
+export declare class OrdersService {
+    private readonly orderRepo;
+    private readonly itemRepo;
+    private readonly historyRepo;
+    private readonly variantRepo;
+    private readonly productRepo;
+    private readonly userRepo;
+    private readonly inventoryService;
+    private readonly cartService;
+    private readonly shippingService;
+    private readonly couponsService;
+    private readonly emailService;
+    private readonly pushService;
+    private readonly settingsService;
+    private readonly dataSource;
+    private readonly logger;
+    constructor(orderRepo: Repository<Order>, itemRepo: Repository<OrderItem>, historyRepo: Repository<OrderStatusHistory>, variantRepo: Repository<ProductVariant>, productRepo: Repository<Product>, userRepo: Repository<User>, inventoryService: InventoryService, cartService: CartService, shippingService: ShippingService, couponsService: CouponsService, emailService: EmailService, pushService: PushService, settingsService: SettingsService, dataSource: DataSource);
+    checkout(dto: CreateOrderDto, userId?: string): Promise<Order>;
+    transitionStatus(orderId: string, dto: UpdateOrderStatusDto, changedBy?: string): Promise<Order>;
+    dispatchOrder(orderId: string, dto: DispatchOrderDto, staffId?: string): Promise<Order>;
+    markDispatchedByScan(ref: string, staffId?: string, note?: string): Promise<Order>;
+    findDispatchQueue(query: OrderQueryDto): Promise<{
+        items: Order[];
+        total: number;
+        page: number;
+        limit: number;
+        pages: number;
+    }>;
+    markDelivered(orderId: string, dto: MarkDeliveredDto, staffId?: string): Promise<Order>;
+    private sendShippingEmailWithTracking;
+    private sendDeliveredEmail;
+    findAll(query: OrderQueryDto): Promise<{
+        items: Order[];
+        total: number;
+        page: number;
+        limit: number;
+        pages: number;
+    }>;
+    findOne(id: string): Promise<Order>;
+    findByOrderNumber(orderNumber: string): Promise<Order>;
+    findByOrderNumberAndEmail(orderNumber: string, email: string): Promise<Order>;
+    private sendOrderEmail;
+    private sendShippingEmail;
+    private resolveOrderEmail;
+}

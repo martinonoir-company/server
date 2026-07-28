@@ -42,7 +42,11 @@ export class StaffService {
 
     const qb = this.userRepo
       .createQueryBuilder('user')
-      .where('user.role != :customer', { customer: UserRole.CUSTOMER })
+      // Staff view excludes customers AND marketing agents — agents are not
+      // staff and are managed on their own page.
+      .where('user.role NOT IN (:...nonStaff)', {
+        nonStaff: [UserRole.CUSTOMER, UserRole.MARKETING_AGENT],
+      })
       .orderBy('user.createdAt', 'DESC')
       .skip(skip)
       .take(limit);
@@ -276,7 +280,11 @@ export class StaffService {
       where: { id },
       withDeleted: opts.allowSuspended,
     });
-    if (!user || user.role === UserRole.CUSTOMER) {
+    if (
+      !user ||
+      user.role === UserRole.CUSTOMER ||
+      user.role === UserRole.MARKETING_AGENT
+    ) {
       throw new NotFoundException('Staff member not found');
     }
     return user;

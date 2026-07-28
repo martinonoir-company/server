@@ -1,0 +1,51 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.GrantScannerPermissionsToRoles1713500070000 = void 0;
+class GrantScannerPermissionsToRoles1713500070000 {
+    constructor() {
+        this.name = 'GrantScannerPermissionsToRoles1713500070000';
+    }
+    async up(queryRunner) {
+        const grants = [
+            { roleName: 'COMPANY_STAFF', permission: 'inventory:adjust' },
+            { roleName: 'COMPANY_SUPER_ADMIN', permission: 'branches:manage' },
+            { roleName: 'SUPER_ADMIN', permission: 'branches:manage' },
+        ];
+        for (const { roleName, permission } of grants) {
+            const result = (await queryRunner.query(`UPDATE "roles"
+            SET "permissions" = COALESCE("permissions", '[]'::jsonb) || to_jsonb($1::text)
+          WHERE "name" = $2
+            AND ("permissions" IS NULL
+                 OR NOT ("permissions" ? $1::text))
+          RETURNING "id"`, [permission, roleName]));
+            if (result.length > 0) {
+                console.log(`  ✓ Granted "${permission}" to role "${roleName}" (${result.length} row${result.length === 1 ? '' : 's'} updated)`);
+            }
+            else {
+                console.log(`  · Role "${roleName}" already has "${permission}" or row missing — no update`);
+            }
+        }
+    }
+    async down(queryRunner) {
+        const grants = [
+            { roleName: 'COMPANY_STAFF', permission: 'inventory:adjust' },
+            { roleName: 'COMPANY_SUPER_ADMIN', permission: 'branches:manage' },
+            { roleName: 'SUPER_ADMIN', permission: 'branches:manage' },
+        ];
+        for (const { roleName, permission } of grants) {
+            await queryRunner.query(`UPDATE "roles"
+            SET "permissions" = COALESCE(
+              (
+                SELECT jsonb_agg(elem)
+                  FROM jsonb_array_elements_text("permissions") AS elem
+                 WHERE elem <> $1
+              ),
+              '[]'::jsonb
+            )
+          WHERE "name" = $2
+            AND "permissions" ? $1::text`, [permission, roleName]);
+        }
+    }
+}
+exports.GrantScannerPermissionsToRoles1713500070000 = GrantScannerPermissionsToRoles1713500070000;
+//# sourceMappingURL=1713500070000-GrantScannerPermissionsToRoles.js.map

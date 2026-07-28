@@ -164,10 +164,14 @@ export class PosSyncService {
         });
       }
 
-      // Use the wholesale price from DB (don't trust client-sent unitPrice)
-      const unitPrice = currency === 'USD'
-        ? Number(variant.wholesalePriceUsd)
-        : Number(variant.wholesalePriceNgn);
+      // Resolve the price from the DB (never trust the client-sent amount),
+      // honouring the cashier's retail/wholesale choice for this line. Older
+      // clients omit priceMode → default to WHOLESALE (prior behaviour).
+      const useRetail = item.priceMode === 'RETAIL';
+      const unitPrice =
+        currency === 'USD'
+          ? Number(useRetail ? variant.retailPriceUsd : variant.wholesalePriceUsd)
+          : Number(useRetail ? variant.retailPriceNgn : variant.wholesalePriceNgn);
       const lineTotal = unitPrice * item.quantity;
       subtotal += lineTotal;
 

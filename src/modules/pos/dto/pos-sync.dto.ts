@@ -21,9 +21,20 @@ export class PosTransactionItemDto {
   @Min(1)
   quantity!: number;
 
-  /** Wholesale unit price captured at POS (for display only — server re-resolves) */
+  /** Unit price captured at POS (for display only — server re-resolves from DB). */
   @IsNumber()
   unitPrice!: number;
+
+  /**
+   * Which DB price the cashier chose for this line. The server derives the
+   * actual amount from the variant's retail/wholesale price accordingly, so
+   * the client can pick the tier without being trusted on the amount.
+   * Optional + defaults to WHOLESALE to stay backward-compatible with older
+   * POS clients that don't send it.
+   */
+  @IsOptional()
+  @IsEnum(['RETAIL', 'WHOLESALE'])
+  priceMode?: 'RETAIL' | 'WHOLESALE';
 }
 
 export class PosPaymentDto {

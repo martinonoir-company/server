@@ -191,10 +191,24 @@ export class PosSessionsService {
       if (!product) {
         throw new NotFoundException('Product not found or inactive');
       }
-      const media = await this.mediaRepo.findOne({
-        where: { productId: product.id, deletedAt: IsNull() },
-        order: { sortOrder: 'ASC', createdAt: 'ASC' },
-      });
+      // Prefer the scanned variant's own image; fall back to a product-level
+      // image only when the variant has none. Resolving by productId alone
+      // (the previous behaviour) always returned a product image, so the
+      // scanner basket and POS tray showed the wrong picture for variants
+      // that have their own media.
+      const media =
+        (await this.mediaRepo.findOne({
+          where: { variantId: variant.id, deletedAt: IsNull() },
+          order: { sortOrder: 'ASC', createdAt: 'ASC' },
+        })) ??
+        (await this.mediaRepo.findOne({
+          where: {
+            productId: product.id,
+            variantId: IsNull(),
+            deletedAt: IsNull(),
+          },
+          order: { sortOrder: 'ASC', createdAt: 'ASC' },
+        }));
       const branch = await this.branchRepo.findOneOrFail({
         where: { id: s.branchId },
       });
