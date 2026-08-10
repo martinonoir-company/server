@@ -8,7 +8,8 @@ export declare class AddSessionItemDto {
     version: number;
 }
 export declare class UpdateSessionItemDto {
-    quantity: number;
+    quantity?: number;
+    priceMode?: 'RETAIL' | 'WHOLESALE';
     version: number;
 }
 export declare class PaymentIntentDto {

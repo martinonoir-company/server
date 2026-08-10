@@ -17,6 +17,9 @@ export interface PosSessionLine {
     sku: string;
     barcode: string | null;
     unitPrice: number;
+    retailPrice: number;
+    wholesalePrice: number;
+    priceMode: 'RETAIL' | 'WHOLESALE';
     quantity: number;
     imageUrl: string | null;
     options: Record<string, string> | null;

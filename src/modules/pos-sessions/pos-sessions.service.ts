@@ -217,10 +217,16 @@ export class PosSessionsService {
       });
       const available = level ? level.onHand - level.reserved : 0;
 
-      const unitPrice =
-        s.cart.currency === 'USD'
-          ? Number(variant.wholesalePriceUsd)
-          : Number(variant.wholesalePriceNgn);
+      const isUsd = s.cart.currency === 'USD';
+      const retailPrice = Number(
+        isUsd ? variant.retailPriceUsd : variant.retailPriceNgn,
+      );
+      const wholesalePrice = Number(
+        isUsd ? variant.wholesalePriceUsd : variant.wholesalePriceNgn,
+      );
+      // Default to retail; the cashier can switch the line to wholesale in the
+      // POS scanner-basket panel before payment.
+      const unitPrice = retailPrice;
 
       // If this exact variant is already in the cart (added under a
       // different clientLineId — e.g. POS web + scanner both scanned it),
@@ -242,6 +248,9 @@ export class PosSessionsService {
         sku: variant.sku,
         barcode: variant.barcode ?? null,
         unitPrice,
+        retailPrice,
+        wholesalePrice,
+        priceMode: 'RETAIL',
         quantity: dto.quantity,
         imageUrl: media?.url ?? null,
         options: variant.options ?? null,
@@ -265,11 +274,34 @@ export class PosSessionsService {
       if (idx === -1) {
         throw new NotFoundException('Line not found in this session');
       }
-      if (dto.quantity <= 0) {
-        s.cart.items.splice(idx, 1);
-        return { changed: true, kind: 'item-removed' };
+      const line = s.cart.items[idx]!;
+
+      // Quantity update (0 removes the line).
+      if (dto.quantity !== undefined) {
+        if (dto.quantity <= 0) {
+          s.cart.items.splice(idx, 1);
+          return { changed: true, kind: 'item-removed' };
+        }
+        line.quantity = dto.quantity;
       }
-      s.cart.items[idx]!.quantity = dto.quantity;
+
+      // Price-tier switch — recompute the effective unitPrice from the price
+      // already resolved server-side when the line was added. recomputeTotals
+      // (run by mutateActive) then refreshes the cart totals.
+      if (dto.priceMode !== undefined) {
+        // Sessions opened before this feature won't have the two price fields
+        // on their lines; only switch when the target price is actually known
+        // so an in-flight basket can't be zero-priced.
+        const target =
+          dto.priceMode === 'WHOLESALE'
+            ? line.wholesalePrice
+            : line.retailPrice;
+        if (typeof target === 'number' && target > 0) {
+          line.priceMode = dto.priceMode;
+          line.unitPrice = target;
+        }
+      }
+
       return { changed: true, kind: 'item-updated' };
     });
   }
@@ -353,6 +385,7 @@ export class PosSessionsService {
         variantId: l.variantId,
         quantity: l.quantity,
         unitPrice: l.unitPrice,
+        priceMode: l.priceMode,
       })),
       payments: dto.payments.map((p) => ({
         method: p.method,

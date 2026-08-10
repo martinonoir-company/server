@@ -36,8 +36,17 @@ export interface PosSessionLine {
   variantName: string | null;
   sku: string;
   barcode: string | null;
-  /** Wholesale unit price in MINOR units (kobo/cents), resolved server-side. */
+  /**
+   * Effective unit price in MINOR units (kobo/cents), resolved server-side.
+   * Mirrors retailPrice or wholesalePrice depending on priceMode so all
+   * totals read one field.
+   */
   unitPrice: number;
+  /** Both DB prices carried so the cashier can switch the line's tier. */
+  retailPrice: number;
+  wholesalePrice: number;
+  /** Which price applies to this line. Defaults to RETAIL. */
+  priceMode: 'RETAIL' | 'WHOLESALE';
   quantity: number;
   imageUrl: string | null;
   options: Record<string, string> | null;

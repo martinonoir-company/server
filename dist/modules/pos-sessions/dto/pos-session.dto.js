@@ -47,10 +47,16 @@ class UpdateSessionItemDto {
 }
 exports.UpdateSessionItemDto = UpdateSessionItemDto;
 __decorate([
+    (0, class_validator_1.IsOptional)(),
     (0, class_validator_1.IsInt)(),
     (0, class_validator_1.Min)(0),
     __metadata("design:type", Number)
 ], UpdateSessionItemDto.prototype, "quantity", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsEnum)(['RETAIL', 'WHOLESALE']),
+    __metadata("design:type", String)
+], UpdateSessionItemDto.prototype, "priceMode", void 0);
 __decorate([
     (0, class_validator_1.IsInt)(),
     (0, class_validator_1.Min)(0),

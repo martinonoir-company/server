@@ -43,10 +43,16 @@ export class AddSessionItemDto {
 
 /** PATCH /pos-sessions/:terminalCode/items/:lineId */
 export class UpdateSessionItemDto {
-  /** New quantity. 0 removes the line. */
+  /** New quantity. 0 removes the line. Optional — omit to change only price. */
+  @IsOptional()
   @IsInt()
   @Min(0)
-  quantity!: number;
+  quantity?: number;
+
+  /** Switch the line between retail and wholesale pricing. */
+  @IsOptional()
+  @IsEnum(['RETAIL', 'WHOLESALE'])
+  priceMode?: 'RETAIL' | 'WHOLESALE';
 
   @IsInt()
   @Min(0)
