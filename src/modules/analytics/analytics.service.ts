@@ -90,6 +90,17 @@ export interface AnalyticsSummary {
     /** Physical units returned + refund requests behind that figure. */
     refundedItemsCount: number;
     refundedRequestsCount: number;
+
+    // ── Promotions (discounts + coupons) applied across all channels ──
+    /** Total value discounted (minor units) on real sales in the window. */
+    promotionsNgn: number;
+    promotionsUsd: number;
+    promotionsNgnPrev: number;
+    /** Split of the NGN promotions total by source. */
+    promotionsCouponNgn: number;
+    promotionsManualNgn: number;
+    /** Number of orders that carried a discount in the window. */
+    promotionsDiscountedOrders: number;
   };
 
   /** Daily/monthly trend for revenue + order count. Length = buckets. */
@@ -109,6 +120,19 @@ export interface AnalyticsSummary {
 
   /** Order count by sales channel inside the window. */
   channelBreakdown: Array<{ channel: string; count: number; revenueNgn: number; revenueUsd: number }>;
+
+  /**
+   * Promotions (discounts + coupons) applied per sales channel in the window.
+   * `amountNgn`/`amountUsd` are minor units; `orders` counts discounted orders.
+   * Note: web and mobile storefront orders both persist as the STOREFRONT
+   * channel, so they are reported together under "Storefront".
+   */
+  promotionChannelBreakdown: Array<{
+    channel: string;
+    amountNgn: number;
+    amountUsd: number;
+    orders: number;
+  }>;
 
   /** New-customer signups bucketed across the window. */
   customerTrend: Array<{ date: string; count: number }>;
@@ -148,6 +172,9 @@ export class AnalyticsService {
       profitPrev,
       refundsCurrent,
       refundsPrev,
+      promotionsCurrent,
+      promotionsPrev,
+      promoChannelBreakdown,
       trend,
       topProducts,
       statusBreakdown,
@@ -167,6 +194,9 @@ export class AnalyticsService {
       this.profitTotals(prevWindowStart, windowStart),
       this.refundsService.totalsRefunded(windowStart, now),
       this.refundsService.totalsRefunded(prevWindowStart, windowStart),
+      this.promotionTotals(windowStart, now),
+      this.promotionTotals(prevWindowStart, windowStart),
+      this.promotionChannelBreakdown(windowStart, now),
       this.revenueTrend(windowStart, now, cfg.truncUnit),
       this.topProducts(windowStart, now),
       this.statusBreakdown(windowStart, now),
@@ -202,11 +232,18 @@ export class AnalyticsService {
         refundedNgnPrev: refundsPrev.amountNgn,
         refundedItemsCount: refundsCurrent.itemsCount,
         refundedRequestsCount: refundsCurrent.requestsCount,
+        promotionsNgn: promotionsCurrent.ngn,
+        promotionsUsd: promotionsCurrent.usd,
+        promotionsNgnPrev: promotionsPrev.ngn,
+        promotionsCouponNgn: promotionsCurrent.couponNgn,
+        promotionsManualNgn: promotionsCurrent.manualNgn,
+        promotionsDiscountedOrders: promotionsCurrent.discountedOrders,
       },
       trend: this.fillTrendGaps(trend, windowStart, now, cfg),
       topProducts,
       statusBreakdown,
       channelBreakdown,
+      promotionChannelBreakdown: promoChannelBreakdown,
       customerTrend: this.fillCustomerTrendGaps(customerTrend, windowStart, now, cfg),
     };
   }
@@ -269,6 +306,81 @@ export class AnalyticsService {
       ngn: Number(row?.ngn ?? 0),
       usd: Number(row?.usd ?? 0),
     };
+  }
+
+  /**
+   * Total promotions (discounts + coupons) applied to real sales in the
+   * window. Mirrors revenueTotals: same REVENUE_STATUSES filter (so cancelled,
+   * pending and refunded orders are excluded) and same createdAt window.
+   *
+   * `orders.discountTotal` is the single authoritative figure — every channel
+   * (storefront/mobile via OrdersService, POS/scanner via PosSyncService)
+   * rolls manual discounts + coupons + auto-applied coupons into it. A coupon
+   * is identified by `couponCode IS NOT NULL` (the storefront writes
+   * discountType='PERCENTAGE', not 'COUPON', so couponCode is the reliable
+   * predicate); everything else is a manual discount.
+   */
+  private async promotionTotals(
+    from: Date,
+    to: Date,
+  ): Promise<{
+    ngn: number;
+    usd: number;
+    couponNgn: number;
+    manualNgn: number;
+    discountedOrders: number;
+  }> {
+    const row = await this.orders
+      .createQueryBuilder('o')
+      .select(`COALESCE(SUM(CASE WHEN o.currency = 'NGN' THEN o."discountTotal" ELSE 0 END), 0)`, 'ngn')
+      .addSelect(`COALESCE(SUM(CASE WHEN o.currency = 'USD' THEN o."discountTotal" ELSE 0 END), 0)`, 'usd')
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN o.currency = 'NGN' AND o."couponCode" IS NOT NULL THEN o."discountTotal" ELSE 0 END), 0)`,
+        'couponNgn',
+      )
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN o.currency = 'NGN' AND o."couponCode" IS NULL THEN o."discountTotal" ELSE 0 END), 0)`,
+        'manualNgn',
+      )
+      .addSelect(`COUNT(*) FILTER (WHERE o."discountTotal" > 0)`, 'discountedOrders')
+      .where('o.status IN (:...statuses)', { statuses: REVENUE_STATUSES })
+      .andWhere('o."discountTotal" > 0')
+      .andWhere('o."createdAt" >= :from AND o."createdAt" < :to', { from, to })
+      .getRawOne<{
+        ngn: string;
+        usd: string;
+        couponNgn: string;
+        manualNgn: string;
+        discountedOrders: string;
+      }>();
+    return {
+      ngn: Number(row?.ngn ?? 0),
+      usd: Number(row?.usd ?? 0),
+      couponNgn: Number(row?.couponNgn ?? 0),
+      manualNgn: Number(row?.manualNgn ?? 0),
+      discountedOrders: Number(row?.discountedOrders ?? 0),
+    };
+  }
+
+  private async promotionChannelBreakdown(from: Date, to: Date) {
+    const rows = await this.orders
+      .createQueryBuilder('o')
+      .select('o.channel', 'channel')
+      .addSelect(`COALESCE(SUM(CASE WHEN o.currency = 'NGN' THEN o."discountTotal" ELSE 0 END), 0)`, 'amountNgn')
+      .addSelect(`COALESCE(SUM(CASE WHEN o.currency = 'USD' THEN o."discountTotal" ELSE 0 END), 0)`, 'amountUsd')
+      .addSelect('COUNT(*)', 'orders')
+      .where('o.status IN (:...statuses)', { statuses: REVENUE_STATUSES })
+      .andWhere('o."discountTotal" > 0')
+      .andWhere('o."createdAt" >= :from AND o."createdAt" < :to', { from, to })
+      .groupBy('o.channel')
+      .orderBy(`SUM(o."discountTotal")`, 'DESC')
+      .getRawMany<{ channel: string; amountNgn: string; amountUsd: string; orders: string }>();
+    return rows.map((r) => ({
+      channel: r.channel,
+      amountNgn: Number(r.amountNgn),
+      amountUsd: Number(r.amountUsd),
+      orders: Number(r.orders),
+    }));
   }
 
   private async orderCount(from: Date, to: Date): Promise<number> {

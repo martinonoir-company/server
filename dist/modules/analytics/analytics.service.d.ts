@@ -39,6 +39,12 @@ export interface AnalyticsSummary {
         refundedNgnPrev: number;
         refundedItemsCount: number;
         refundedRequestsCount: number;
+        promotionsNgn: number;
+        promotionsUsd: number;
+        promotionsNgnPrev: number;
+        promotionsCouponNgn: number;
+        promotionsManualNgn: number;
+        promotionsDiscountedOrders: number;
     };
     trend: TrendPoint[];
     topProducts: Array<{
@@ -58,6 +64,12 @@ export interface AnalyticsSummary {
         revenueNgn: number;
         revenueUsd: number;
     }>;
+    promotionChannelBreakdown: Array<{
+        channel: string;
+        amountNgn: number;
+        amountUsd: number;
+        orders: number;
+    }>;
     customerTrend: Array<{
         date: string;
         count: number;
@@ -75,6 +87,8 @@ export declare class AnalyticsService {
     getSummary(range: AnalyticsRange): Promise<AnalyticsSummary>;
     private profitTotals;
     private revenueTotals;
+    private promotionTotals;
+    private promotionChannelBreakdown;
     private orderCount;
     private newCustomerCount;
     private totalActiveProducts;

@@ -57,7 +57,7 @@ let AnalyticsService = class AnalyticsService {
         const now = new Date();
         const windowStart = new Date(now.getTime() - cfg.days * 24 * 60 * 60 * 1000);
         const prevWindowStart = new Date(windowStart.getTime() - cfg.days * 24 * 60 * 60 * 1000);
-        const [revenueCurrent, revenuePrev, orderCountCurrent, orderCountPrev, newCustomersCurrent, newCustomersPrev, totalProducts, lowStockCount, pendingOrders, profitCurrent, profitPrev, refundsCurrent, refundsPrev, trend, topProducts, statusBreakdown, channelBreakdown, customerTrend,] = await Promise.all([
+        const [revenueCurrent, revenuePrev, orderCountCurrent, orderCountPrev, newCustomersCurrent, newCustomersPrev, totalProducts, lowStockCount, pendingOrders, profitCurrent, profitPrev, refundsCurrent, refundsPrev, promotionsCurrent, promotionsPrev, promoChannelBreakdown, trend, topProducts, statusBreakdown, channelBreakdown, customerTrend,] = await Promise.all([
             this.revenueTotals(windowStart, now),
             this.revenueTotals(prevWindowStart, windowStart),
             this.orderCount(windowStart, now),
@@ -71,6 +71,9 @@ let AnalyticsService = class AnalyticsService {
             this.profitTotals(prevWindowStart, windowStart),
             this.refundsService.totalsRefunded(windowStart, now),
             this.refundsService.totalsRefunded(prevWindowStart, windowStart),
+            this.promotionTotals(windowStart, now),
+            this.promotionTotals(prevWindowStart, windowStart),
+            this.promotionChannelBreakdown(windowStart, now),
             this.revenueTrend(windowStart, now, cfg.truncUnit),
             this.topProducts(windowStart, now),
             this.statusBreakdown(windowStart, now),
@@ -103,11 +106,18 @@ let AnalyticsService = class AnalyticsService {
                 refundedNgnPrev: refundsPrev.amountNgn,
                 refundedItemsCount: refundsCurrent.itemsCount,
                 refundedRequestsCount: refundsCurrent.requestsCount,
+                promotionsNgn: promotionsCurrent.ngn,
+                promotionsUsd: promotionsCurrent.usd,
+                promotionsNgnPrev: promotionsPrev.ngn,
+                promotionsCouponNgn: promotionsCurrent.couponNgn,
+                promotionsManualNgn: promotionsCurrent.manualNgn,
+                promotionsDiscountedOrders: promotionsCurrent.discountedOrders,
             },
             trend: this.fillTrendGaps(trend, windowStart, now, cfg),
             topProducts,
             statusBreakdown,
             channelBreakdown,
+            promotionChannelBreakdown: promoChannelBreakdown,
             customerTrend: this.fillCustomerTrendGaps(customerTrend, windowStart, now, cfg),
         };
     }
@@ -144,6 +154,46 @@ let AnalyticsService = class AnalyticsService {
             ngn: Number(row?.ngn ?? 0),
             usd: Number(row?.usd ?? 0),
         };
+    }
+    async promotionTotals(from, to) {
+        const row = await this.orders
+            .createQueryBuilder('o')
+            .select(`COALESCE(SUM(CASE WHEN o.currency = 'NGN' THEN o."discountTotal" ELSE 0 END), 0)`, 'ngn')
+            .addSelect(`COALESCE(SUM(CASE WHEN o.currency = 'USD' THEN o."discountTotal" ELSE 0 END), 0)`, 'usd')
+            .addSelect(`COALESCE(SUM(CASE WHEN o.currency = 'NGN' AND o."couponCode" IS NOT NULL THEN o."discountTotal" ELSE 0 END), 0)`, 'couponNgn')
+            .addSelect(`COALESCE(SUM(CASE WHEN o.currency = 'NGN' AND o."couponCode" IS NULL THEN o."discountTotal" ELSE 0 END), 0)`, 'manualNgn')
+            .addSelect(`COUNT(*) FILTER (WHERE o."discountTotal" > 0)`, 'discountedOrders')
+            .where('o.status IN (:...statuses)', { statuses: REVENUE_STATUSES })
+            .andWhere('o."discountTotal" > 0')
+            .andWhere('o."createdAt" >= :from AND o."createdAt" < :to', { from, to })
+            .getRawOne();
+        return {
+            ngn: Number(row?.ngn ?? 0),
+            usd: Number(row?.usd ?? 0),
+            couponNgn: Number(row?.couponNgn ?? 0),
+            manualNgn: Number(row?.manualNgn ?? 0),
+            discountedOrders: Number(row?.discountedOrders ?? 0),
+        };
+    }
+    async promotionChannelBreakdown(from, to) {
+        const rows = await this.orders
+            .createQueryBuilder('o')
+            .select('o.channel', 'channel')
+            .addSelect(`COALESCE(SUM(CASE WHEN o.currency = 'NGN' THEN o."discountTotal" ELSE 0 END), 0)`, 'amountNgn')
+            .addSelect(`COALESCE(SUM(CASE WHEN o.currency = 'USD' THEN o."discountTotal" ELSE 0 END), 0)`, 'amountUsd')
+            .addSelect('COUNT(*)', 'orders')
+            .where('o.status IN (:...statuses)', { statuses: REVENUE_STATUSES })
+            .andWhere('o."discountTotal" > 0')
+            .andWhere('o."createdAt" >= :from AND o."createdAt" < :to', { from, to })
+            .groupBy('o.channel')
+            .orderBy(`SUM(o."discountTotal")`, 'DESC')
+            .getRawMany();
+        return rows.map((r) => ({
+            channel: r.channel,
+            amountNgn: Number(r.amountNgn),
+            amountUsd: Number(r.amountUsd),
+            orders: Number(r.orders),
+        }));
     }
     async orderCount(from, to) {
         return this.orders
