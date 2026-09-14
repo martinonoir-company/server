@@ -71,7 +71,7 @@ __decorate([
 ], StockMovement.prototype, "clientLineId", void 0);
 exports.StockMovement = StockMovement = __decorate([
     (0, typeorm_1.Entity)('stock_movements'),
-    (0, typeorm_1.Index)(['referenceId', 'referenceType', 'variantId', 'kind'], { unique: true, where: '"referenceId" IS NOT NULL' })
+    (0, typeorm_1.Index)(['referenceId', 'referenceType', 'variantId', 'kind'], { unique: true, where: `"referenceId" IS NOT NULL AND kind <> 'RETURN'` })
 ], StockMovement);
 let StockLevel = class StockLevel {
     get available() {

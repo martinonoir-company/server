@@ -85,5 +85,7 @@ export declare class RefundsService {
         requestsCount: number;
     }>;
     private markOrderRefunded;
+    private markOrderRefundedIfFull;
+    private isOrderFullyRefunded;
 }
 export {};

@@ -9,7 +9,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import {
   RefundRequest,
   RefundRequestItem,
@@ -203,6 +203,13 @@ export class RefundsService {
     let totalUnits = 0;
     const itemRows: Partial<RefundRequestItem>[] = [];
 
+    // Track how many extra units each order item is being refunded now, so
+    // we can (a) validate against what's LEFT to refund on the line — not the
+    // original quantity — and (b) bump order_items.refundedQuantity in the
+    // transaction. Keyed by order-item id. A variant could appear on the
+    // order more than once in theory; itemsByVariant already collapses to one
+    // row, matching the existing behaviour.
+    const refundQtyByOrderItem = new Map<string, number>();
     for (const line of input.lines) {
       const oi = itemsByVariant.get(line.variantId);
       if (!oi) {
@@ -210,11 +217,20 @@ export class RefundsService {
           `Variant ${line.variantId} was not on order ${order.orderNumber}.`,
         );
       }
-      if (line.quantity <= 0 || line.quantity > oi.quantity) {
+      const alreadyRefunded = oi.refundedQuantity ?? 0;
+      const remaining = oi.quantity - alreadyRefunded;
+      if (line.quantity <= 0 || line.quantity > remaining) {
         throw new BadRequestException(
-          `Returning ${line.quantity} of ${oi.productName} exceeds ordered quantity (${oi.quantity}).`,
+          remaining <= 0
+            ? `${oi.productName} has already been fully refunded.`
+            : `Returning ${line.quantity} of ${oi.productName} exceeds the ` +
+              `quantity still refundable (${remaining} of ${oi.quantity} left).`,
         );
       }
+      refundQtyByOrderItem.set(
+        oi.id,
+        (refundQtyByOrderItem.get(oi.id) ?? 0) + line.quantity,
+      );
       const lineTotal = Number(oi.unitPrice) * line.quantity;
       computedTotalMinor += lineTotal;
       totalUnits += line.quantity;
@@ -355,16 +371,24 @@ export class RefundsService {
         );
       }
 
-      // Move the order along its FSM if the channel supports it. We
-      // intentionally do NOT auto-mark REFUNDED — that happens after the
-      // refund SUCCEEDS in execute(). For COMPLETED_BY_STAFF cash, we go
-      // straight to REFUNDED inside this same transaction.
-      if (status === RefundStatus.COMPLETED_BY_STAFF) {
-        await manager.update(
-          Order,
-          { id: order.id },
-          { status: OrderStatus.REFUNDED },
+      // Record the refunded units against each order line so partial refunds
+      // are tracked and the same units can't be refunded twice.
+      for (const [orderItemId, qty] of refundQtyByOrderItem) {
+        await manager.increment(
+          OrderItem,
+          { id: orderItemId },
+          'refundedQuantity',
+          qty,
         );
+      }
+
+      // Cash refunds settle immediately. Only mark the ORDER fully REFUNDED
+      // when the whole order has now been refunded; a partial cash refund
+      // leaves the order status as-is (the refund itself is recorded on the
+      // refund request + the per-line refundedQuantity). Paystack paths do
+      // the same later, after the transfer/refund SUCCEEDS.
+      if (status === RefundStatus.COMPLETED_BY_STAFF) {
+        await this.markOrderRefundedIfFull(manager, order.id);
       }
 
       return savedRefund;
@@ -634,17 +658,77 @@ export class RefundsService {
 
   // ── Private helpers ──
 
+  /**
+   * Mark the order REFUNDED only if the whole order has now been refunded;
+   * a partial refund leaves the order status unchanged. Called after a refund
+   * settles (cash immediately, Paystack after success). Order-status change +
+   * agent-commission reversal both happen only on a FULL refund.
+   *
+   * "Fully refunded" is true when either:
+   *   - every order line is fully refunded (Σ refundedQuantity == Σ quantity,
+   *     the line-based path), OR
+   *   - the total refunded amount across non-failed refunds ≥ the order total
+   *     (covers amount-only / skip-scan refunds that carry no lines).
+   */
   private async markOrderRefunded(orderId: string): Promise<void> {
-    await this.orderRepo.update(
-      { id: orderId },
-      { status: OrderStatus.REFUNDED },
-    );
-    // Reverse any earned agent commission on this order. The agents
-    // service handles the idempotency; if the order had no agentCode or
-    // the attribution was already REVERSED, this is a no-op. We never
-    // block the refund on this — failure is logged inside the service.
-    if (this.agentsService) {
-      await this.agentsService.reverseAttributionOnRefund(orderId);
+    if (await this.isOrderFullyRefunded(this.dataSource.manager, orderId)) {
+      await this.orderRepo.update(
+        { id: orderId },
+        { status: OrderStatus.REFUNDED },
+      );
+      // Reverse any earned agent commission on this order. Idempotent; no-op
+      // when there was no agentCode or it was already reversed. Never blocks
+      // the refund — failure is logged inside the service.
+      if (this.agentsService) {
+        await this.agentsService.reverseAttributionOnRefund(orderId);
+      }
     }
+  }
+
+  /** In-transaction variant used by the immediate cash-refund path. */
+  private async markOrderRefundedIfFull(
+    manager: EntityManager,
+    orderId: string,
+  ): Promise<void> {
+    if (await this.isOrderFullyRefunded(manager, orderId)) {
+      await manager.update(Order, { id: orderId }, { status: OrderStatus.REFUNDED });
+      if (this.agentsService) {
+        await this.agentsService.reverseAttributionOnRefund(orderId);
+      }
+    }
+  }
+
+  private async isOrderFullyRefunded(
+    manager: EntityManager,
+    orderId: string,
+  ): Promise<boolean> {
+    const order = await manager.findOne(Order, {
+      where: { id: orderId },
+      relations: ['items'],
+    });
+    if (!order) return false;
+
+    // Line-based: every unit on every line has been refunded.
+    const items = order.items ?? [];
+    if (items.length > 0) {
+      const fullyByLines = items.every(
+        (i) => (i.refundedQuantity ?? 0) >= i.quantity,
+      );
+      if (fullyByLines) return true;
+    }
+
+    // Amount-based fallback (skip-scan / customAmount refunds with no lines):
+    // treat the order as fully refunded once the settled/settling refund
+    // amount reaches the order total. Excludes FAILED/REJECTED refunds.
+    const row = await manager
+      .createQueryBuilder(RefundRequest, 'r')
+      .select('COALESCE(SUM(r.amount), 0)', 'total')
+      .where('r."orderId" = :orderId', { orderId })
+      .andWhere('r.status NOT IN (:...dead)', {
+        dead: [RefundStatus.FAILED, RefundStatus.REJECTED],
+      })
+      .getRawOne<{ total: string }>();
+    const refundedAmount = Number(row?.total ?? 0);
+    return refundedAmount >= Number(order.grandTotal);
   }
 }

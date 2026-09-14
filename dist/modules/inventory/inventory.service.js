@@ -61,7 +61,7 @@ let InventoryService = InventoryService_1 = class InventoryService {
                 return { movement: existing, deduplicated: true };
             }
         }
-        if (input.referenceId && input.referenceType) {
+        if (!input.clientLineId && input.referenceId && input.referenceType) {
             const existing = await manager.findOne(inventory_entity_1.StockMovement, {
                 where: {
                     referenceId: input.referenceId,

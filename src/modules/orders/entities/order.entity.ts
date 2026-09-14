@@ -319,6 +319,15 @@ export class OrderItem extends BaseEntity {
   @Column({ type: 'int' })
   quantity!: number;
 
+  /**
+   * Cumulative units of this line that have been refunded/returned. Starts at
+   * 0 and is incremented by the refund service. Enables partial refunds
+   * (e.g. 2 of 5) and prevents refunding the same units twice. The line is
+   * fully refunded when refundedQuantity === quantity.
+   */
+  @Column({ type: 'int', default: 0 })
+  refundedQuantity!: number;
+
   /** Unit price in minor units at time of purchase */
   @Column({ type: 'bigint' })
   unitPrice!: number;

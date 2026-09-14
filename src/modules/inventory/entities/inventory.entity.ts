@@ -31,9 +31,13 @@ export enum MovementKind {
  *   SALE, RESERVATION, ADJUSTMENT, TRANSFER_OUT → decreases available
  */
 @Entity('stock_movements')
+// One movement per (reference, variant, kind) — dedupes order/sale postings.
+// RETURN is excluded: a single order can have several partial returns of the
+// same variant (each a distinct refund), so RETURN movements are deduped by
+// their unique clientLineId instead, not by this coarse reference tuple.
 @Index(
   ['referenceId', 'referenceType', 'variantId', 'kind'],
-  { unique: true, where: '"referenceId" IS NOT NULL' },
+  { unique: true, where: `"referenceId" IS NOT NULL AND kind <> 'RETURN'` },
 )
 export class StockMovement extends BaseEntity {
   @Index()

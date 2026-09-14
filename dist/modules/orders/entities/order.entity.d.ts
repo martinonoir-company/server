@@ -100,6 +100,7 @@ export declare class OrderItem extends BaseEntity {
     variantName?: string;
     sku: string;
     quantity: number;
+    refundedQuantity: number;
     unitPrice: number;
     lineTotal: number;
     discountAmount: number;

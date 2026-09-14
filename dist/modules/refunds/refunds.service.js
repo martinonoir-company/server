@@ -93,14 +93,21 @@ let RefundsService = RefundsService_1 = class RefundsService {
         let computedTotalMinor = 0;
         let totalUnits = 0;
         const itemRows = [];
+        const refundQtyByOrderItem = new Map();
         for (const line of input.lines) {
             const oi = itemsByVariant.get(line.variantId);
             if (!oi) {
                 throw new common_1.BadRequestException(`Variant ${line.variantId} was not on order ${order.orderNumber}.`);
             }
-            if (line.quantity <= 0 || line.quantity > oi.quantity) {
-                throw new common_1.BadRequestException(`Returning ${line.quantity} of ${oi.productName} exceeds ordered quantity (${oi.quantity}).`);
+            const alreadyRefunded = oi.refundedQuantity ?? 0;
+            const remaining = oi.quantity - alreadyRefunded;
+            if (line.quantity <= 0 || line.quantity > remaining) {
+                throw new common_1.BadRequestException(remaining <= 0
+                    ? `${oi.productName} has already been fully refunded.`
+                    : `Returning ${line.quantity} of ${oi.productName} exceeds the ` +
+                        `quantity still refundable (${remaining} of ${oi.quantity} left).`);
             }
+            refundQtyByOrderItem.set(oi.id, (refundQtyByOrderItem.get(oi.id) ?? 0) + line.quantity);
             const lineTotal = Number(oi.unitPrice) * line.quantity;
             computedTotalMinor += lineTotal;
             totalUnits += line.quantity;
@@ -199,8 +206,11 @@ let RefundsService = RefundsService_1 = class RefundsService {
                     stockMovementId: movement.id,
                 }));
             }
+            for (const [orderItemId, qty] of refundQtyByOrderItem) {
+                await manager.increment(order_entity_1.OrderItem, { id: orderItemId }, 'refundedQuantity', qty);
+            }
             if (status === refund_request_entity_1.RefundStatus.COMPLETED_BY_STAFF) {
-                await manager.update(order_entity_1.Order, { id: order.id }, { status: order_entity_1.OrderStatus.REFUNDED });
+                await this.markOrderRefundedIfFull(manager, order.id);
             }
             return savedRefund;
         });
@@ -383,10 +393,44 @@ let RefundsService = RefundsService_1 = class RefundsService {
         };
     }
     async markOrderRefunded(orderId) {
-        await this.orderRepo.update({ id: orderId }, { status: order_entity_1.OrderStatus.REFUNDED });
-        if (this.agentsService) {
-            await this.agentsService.reverseAttributionOnRefund(orderId);
+        if (await this.isOrderFullyRefunded(this.dataSource.manager, orderId)) {
+            await this.orderRepo.update({ id: orderId }, { status: order_entity_1.OrderStatus.REFUNDED });
+            if (this.agentsService) {
+                await this.agentsService.reverseAttributionOnRefund(orderId);
+            }
         }
+    }
+    async markOrderRefundedIfFull(manager, orderId) {
+        if (await this.isOrderFullyRefunded(manager, orderId)) {
+            await manager.update(order_entity_1.Order, { id: orderId }, { status: order_entity_1.OrderStatus.REFUNDED });
+            if (this.agentsService) {
+                await this.agentsService.reverseAttributionOnRefund(orderId);
+            }
+        }
+    }
+    async isOrderFullyRefunded(manager, orderId) {
+        const order = await manager.findOne(order_entity_1.Order, {
+            where: { id: orderId },
+            relations: ['items'],
+        });
+        if (!order)
+            return false;
+        const items = order.items ?? [];
+        if (items.length > 0) {
+            const fullyByLines = items.every((i) => (i.refundedQuantity ?? 0) >= i.quantity);
+            if (fullyByLines)
+                return true;
+        }
+        const row = await manager
+            .createQueryBuilder(refund_request_entity_1.RefundRequest, 'r')
+            .select('COALESCE(SUM(r.amount), 0)', 'total')
+            .where('r."orderId" = :orderId', { orderId })
+            .andWhere('r.status NOT IN (:...dead)', {
+            dead: [refund_request_entity_1.RefundStatus.FAILED, refund_request_entity_1.RefundStatus.REJECTED],
+        })
+            .getRawOne();
+        const refundedAmount = Number(row?.total ?? 0);
+        return refundedAmount >= Number(order.grandTotal);
     }
 };
 exports.RefundsService = RefundsService;

@@ -143,7 +143,14 @@ export class InventoryService {
     }
 
     // ── 1b. IDEMPOTENCY: reference-tuple-based (legacy path) ──
-    if (input.referenceId && input.referenceType) {
+    // Only when no clientLineId was supplied. A clientLineId is the precise
+    // per-line idempotency key (checked in 1a); when present it already
+    // guarantees uniqueness, and the coarse reference tuple (referenceId +
+    // referenceType + variantId + kind) would otherwise wrongly collapse
+    // several legitimately-distinct movements for the same variant on the
+    // same reference — e.g. two partial refunds of the same item on one order,
+    // where only the first would restore stock.
+    if (!input.clientLineId && input.referenceId && input.referenceType) {
       const existing = await manager.findOne(StockMovement, {
         where: {
           referenceId: input.referenceId,

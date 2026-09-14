@@ -290,6 +290,10 @@ __decorate([
     __metadata("design:type", Number)
 ], OrderItem.prototype, "quantity", void 0);
 __decorate([
+    (0, typeorm_1.Column)({ type: 'int', default: 0 }),
+    __metadata("design:type", Number)
+], OrderItem.prototype, "refundedQuantity", void 0);
+__decorate([
     (0, typeorm_1.Column)({ type: 'bigint' }),
     __metadata("design:type", Number)
 ], OrderItem.prototype, "unitPrice", void 0);
