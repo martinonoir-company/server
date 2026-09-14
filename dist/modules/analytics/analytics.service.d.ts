@@ -35,6 +35,8 @@ export interface AnalyticsSummary {
         profitNgnPrev: number;
         profitItemsCosted: number;
         profitItemsTotal: number;
+        netProfitNgn: number;
+        netProfitNgnPrev: number;
         refundedNgn: number;
         refundedNgnPrev: number;
         refundedItemsCount: number;

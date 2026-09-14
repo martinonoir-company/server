@@ -84,6 +84,9 @@ export interface AnalyticsSummary {
     /** Sold order-items with a cost recorded / total — cost-data coverage. */
     profitItemsCosted: number;
     profitItemsTotal: number;
+    /** Net profit (NGN, minor units) = gross profit − promotions applied. */
+    netProfitNgn: number;
+    netProfitNgnPrev: number;
     /** Total refunded (NGN, minor units) inside the window. */
     refundedNgn: number;
     refundedNgnPrev: number;
@@ -228,6 +231,13 @@ export class AnalyticsService {
         profitNgnPrev: profitPrev.profitNgn,
         profitItemsCosted: profitCurrent.itemsCosted,
         profitItemsTotal: profitCurrent.itemsTotal,
+        // Net profit = gross profit − promotions (discounts + coupons). Gross
+        // profit is summed from pre-discount line prices, while the discount
+        // sits at order level, so the promotion must be subtracted here to get
+        // the actual realised profit. Same order set (REVENUE_STATUSES, NGN,
+        // window) as profit and promotions, so the subtraction is exact.
+        netProfitNgn: profitCurrent.profitNgn - promotionsCurrent.ngn,
+        netProfitNgnPrev: profitPrev.profitNgn - promotionsPrev.ngn,
         refundedNgn: refundsCurrent.amountNgn,
         refundedNgnPrev: refundsPrev.amountNgn,
         refundedItemsCount: refundsCurrent.itemsCount,

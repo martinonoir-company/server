@@ -102,6 +102,8 @@ let AnalyticsService = class AnalyticsService {
                 profitNgnPrev: profitPrev.profitNgn,
                 profitItemsCosted: profitCurrent.itemsCosted,
                 profitItemsTotal: profitCurrent.itemsTotal,
+                netProfitNgn: profitCurrent.profitNgn - promotionsCurrent.ngn,
+                netProfitNgnPrev: profitPrev.profitNgn - promotionsPrev.ngn,
                 refundedNgn: refundsCurrent.amountNgn,
                 refundedNgnPrev: refundsPrev.amountNgn,
                 refundedItemsCount: refundsCurrent.itemsCount,
