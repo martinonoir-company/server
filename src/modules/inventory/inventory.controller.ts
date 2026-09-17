@@ -6,6 +6,7 @@ import {
 } from './inventory.service';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { RequirePermissions } from '../../shared/decorators/require-permissions.decorator';
+import { Public } from '../../shared/decorators/public.decorator';
 import { Permission } from '../users/entities/role.entity';
 import {
   IsString,
@@ -131,7 +132,14 @@ export class InventoryController {
   /**
    * Get stock level for a specific variant.
    * Used by all frontends (storefront, mobile, admin, POS).
+   *
+   * Public: the storefront and mobile product pages need a variant's
+   * availability to show "In stock" / "Only N left" / "Out of stock" BEFORE a
+   * customer signs in. Without this, guests' stock lookups 401'd and every
+   * product wrongly showed "out of stock". Only single-variant availability is
+   * exposed; the list, movement-history and adjustment endpoints stay guarded.
    */
+  @Public()
   @Get('levels/:variantId')
   async getStockLevel(
     @Param('variantId') variantId: string,

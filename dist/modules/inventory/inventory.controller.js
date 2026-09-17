@@ -17,6 +17,7 @@ const common_1 = require("@nestjs/common");
 const inventory_service_1 = require("./inventory.service");
 const jwt_auth_guard_1 = require("../../shared/guards/jwt-auth.guard");
 const require_permissions_decorator_1 = require("../../shared/decorators/require-permissions.decorator");
+const public_decorator_1 = require("../../shared/decorators/public.decorator");
 const role_entity_1 = require("../users/entities/role.entity");
 const class_validator_1 = require("class-validator");
 const inventory_entity_1 = require("./entities/inventory.entity");
@@ -209,6 +210,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], InventoryController.prototype, "getAllStockLevels", null);
 __decorate([
+    (0, public_decorator_1.Public)(),
     (0, common_1.Get)('levels/:variantId'),
     __param(0, (0, common_1.Param)('variantId')),
     __param(1, (0, common_1.Query)('warehouse')),
