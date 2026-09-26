@@ -210,6 +210,15 @@ export class RefundsService {
     // order more than once in theory; itemsByVariant already collapses to one
     // row, matching the existing behaviour.
     const refundQtyByOrderItem = new Map<string, number>();
+    // The RETURN stock movements to write. Populated from the explicit scanned
+    // lines below, or synthesised for a full skip-scan return further down.
+    // Each carries its own clientLineId for idempotency.
+    const stockLines: Array<{
+      variantId: string;
+      quantity: number;
+      clientLineId: string;
+      reason: string;
+    }> = [];
     for (const line of input.lines) {
       const oi = itemsByVariant.get(line.variantId);
       if (!oi) {
@@ -246,6 +255,14 @@ export class RefundsService {
         reasonCode: line.reasonCode,
         reasonNote: line.reasonNote,
       });
+      stockLines.push({
+        variantId: oi.variantId,
+        quantity: line.quantity,
+        clientLineId: line.clientLineId,
+        reason: line.reasonNote
+          ? `${line.reasonCode ?? 'Return'} — ${line.reasonNote}`
+          : line.reasonCode ?? 'Return',
+      });
     }
 
     // Resolve the actual amount we'll refund.
@@ -273,6 +290,55 @@ export class RefundsService {
       );
     } else {
       totalRefundMinor = computedTotalMinor;
+    }
+
+    // Skip-scan (amount-only) returns carry no explicit lines, so the stock
+    // loop below would restore nothing even though goods came back. When the
+    // refund covers the ENTIRE remaining refundable value of the order, we can
+    // safely infer a full return and restore every still-unrefunded unit of
+    // each tracked line — no guessing required. (A partial amount with no
+    // lines is genuinely ambiguous about WHICH items came back, so we leave
+    // inventory untouched there rather than risk corrupting it.)
+    if (input.lines.length === 0) {
+      const orderItems = order.items ?? [];
+      const remainingRefundableMinor = orderItems.reduce((sum, oi) => {
+        const remaining = oi.quantity - (oi.refundedQuantity ?? 0);
+        return sum + Math.max(0, remaining) * Number(oi.unitPrice);
+      }, 0);
+      // "Full" = the refund amount reaches the value of all remaining units.
+      const isFullRemainingRefund =
+        remainingRefundableMinor > 0 &&
+        totalRefundMinor >= remainingRefundableMinor;
+      if (isFullRemainingRefund) {
+        for (const oi of orderItems) {
+          const remaining = oi.quantity - (oi.refundedQuantity ?? 0);
+          if (remaining <= 0) continue;
+          refundQtyByOrderItem.set(oi.id, remaining);
+          totalUnits += remaining;
+          itemRows.push({
+            orderItemId: oi.id,
+            variantId: oi.variantId,
+            productName: oi.productName,
+            variantName: oi.variantName,
+            sku: oi.sku,
+            quantity: remaining,
+            unitPrice: Number(oi.unitPrice),
+            lineTotal: Number(oi.unitPrice) * remaining,
+            reasonCode: input.reason ? undefined : 'CUSTOMER_RETURN',
+            reasonNote: input.reason,
+          });
+          // Deterministic clientLineId (the order-item id — a 26-char ULID that
+          // fits the column and is unique per synthesised line) so a retried
+          // submit stays idempotent. A full return consumes all remaining units,
+          // so this line can only be produced once per order item.
+          stockLines.push({
+            variantId: oi.variantId,
+            quantity: remaining,
+            clientLineId: oi.id,
+            reason: input.reason ?? 'Customer return (full)',
+          });
+        }
+      }
     }
 
     // Find the original payment(s) — prefer one SUCCEEDED row matching the
@@ -339,25 +405,24 @@ export class RefundsService {
       });
       const savedRefund = await manager.save(RefundRequest, created);
 
-      // Stock movements — one RETURN per line, idempotent on clientLineId.
-      for (let i = 0; i < input.lines.length; i++) {
-        const line = input.lines[i]!;
+      // Stock movements — one RETURN per line (explicit scanned lines OR the
+      // lines synthesised for a full skip-scan return), idempotent on
+      // clientLineId. stockLines and itemRows are populated together, in order.
+      for (let i = 0; i < stockLines.length; i++) {
+        const sl = stockLines[i]!;
         const itemRow = itemRows[i]!;
         const { movement } = await this.inventoryService.recordMovementOnManager(
           manager,
           {
-            variantId: line.variantId,
+            variantId: sl.variantId,
             kind: MovementKind.RETURN,
-            quantity: line.quantity,
+            quantity: sl.quantity,
             warehouseCode: input.warehouseCode ?? 'DEFAULT',
             referenceId: order.id,
             referenceType: 'CUSTOMER_RETURN',
-            reason:
-              line.reasonNote
-                ? `${line.reasonCode ?? 'Return'} — ${line.reasonNote}`
-                : line.reasonCode ?? 'Return',
+            reason: sl.reason,
             createdBy: input.createdBy,
-            clientLineId: line.clientLineId,
+            clientLineId: sl.clientLineId,
           },
         );
 

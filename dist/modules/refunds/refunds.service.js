@@ -94,6 +94,7 @@ let RefundsService = RefundsService_1 = class RefundsService {
         let totalUnits = 0;
         const itemRows = [];
         const refundQtyByOrderItem = new Map();
+        const stockLines = [];
         for (const line of input.lines) {
             const oi = itemsByVariant.get(line.variantId);
             if (!oi) {
@@ -123,6 +124,14 @@ let RefundsService = RefundsService_1 = class RefundsService {
                 reasonCode: line.reasonCode,
                 reasonNote: line.reasonNote,
             });
+            stockLines.push({
+                variantId: oi.variantId,
+                quantity: line.quantity,
+                clientLineId: line.clientLineId,
+                reason: line.reasonNote
+                    ? `${line.reasonCode ?? 'Return'} — ${line.reasonNote}`
+                    : line.reasonCode ?? 'Return',
+            });
         }
         let totalRefundMinor;
         if (input.customAmount && input.customAmount > 0) {
@@ -137,6 +146,42 @@ let RefundsService = RefundsService_1 = class RefundsService {
         }
         else {
             totalRefundMinor = computedTotalMinor;
+        }
+        if (input.lines.length === 0) {
+            const orderItems = order.items ?? [];
+            const remainingRefundableMinor = orderItems.reduce((sum, oi) => {
+                const remaining = oi.quantity - (oi.refundedQuantity ?? 0);
+                return sum + Math.max(0, remaining) * Number(oi.unitPrice);
+            }, 0);
+            const isFullRemainingRefund = remainingRefundableMinor > 0 &&
+                totalRefundMinor >= remainingRefundableMinor;
+            if (isFullRemainingRefund) {
+                for (const oi of orderItems) {
+                    const remaining = oi.quantity - (oi.refundedQuantity ?? 0);
+                    if (remaining <= 0)
+                        continue;
+                    refundQtyByOrderItem.set(oi.id, remaining);
+                    totalUnits += remaining;
+                    itemRows.push({
+                        orderItemId: oi.id,
+                        variantId: oi.variantId,
+                        productName: oi.productName,
+                        variantName: oi.variantName,
+                        sku: oi.sku,
+                        quantity: remaining,
+                        unitPrice: Number(oi.unitPrice),
+                        lineTotal: Number(oi.unitPrice) * remaining,
+                        reasonCode: input.reason ? undefined : 'CUSTOMER_RETURN',
+                        reasonNote: input.reason,
+                    });
+                    stockLines.push({
+                        variantId: oi.variantId,
+                        quantity: remaining,
+                        clientLineId: oi.id,
+                        reason: input.reason ?? 'Customer return (full)',
+                    });
+                }
+            }
         }
         const payments = await this.paymentRepo.find({
             where: { orderId: order.id, status: payment_entity_1.PaymentStatus.SUCCEEDED },
@@ -184,21 +229,19 @@ let RefundsService = RefundsService_1 = class RefundsService {
                 bankAccountName: input.bankDetails?.accountName ?? null,
             });
             const savedRefund = await manager.save(refund_request_entity_1.RefundRequest, created);
-            for (let i = 0; i < input.lines.length; i++) {
-                const line = input.lines[i];
+            for (let i = 0; i < stockLines.length; i++) {
+                const sl = stockLines[i];
                 const itemRow = itemRows[i];
                 const { movement } = await this.inventoryService.recordMovementOnManager(manager, {
-                    variantId: line.variantId,
+                    variantId: sl.variantId,
                     kind: inventory_entity_1.MovementKind.RETURN,
-                    quantity: line.quantity,
+                    quantity: sl.quantity,
                     warehouseCode: input.warehouseCode ?? 'DEFAULT',
                     referenceId: order.id,
                     referenceType: 'CUSTOMER_RETURN',
-                    reason: line.reasonNote
-                        ? `${line.reasonCode ?? 'Return'} — ${line.reasonNote}`
-                        : line.reasonCode ?? 'Return',
+                    reason: sl.reason,
                     createdBy: input.createdBy,
-                    clientLineId: line.clientLineId,
+                    clientLineId: sl.clientLineId,
                 });
                 await manager.save(refund_request_entity_1.RefundRequestItem, manager.create(refund_request_entity_1.RefundRequestItem, {
                     ...itemRow,
