@@ -36,11 +36,11 @@ let CartController = class CartController {
         return { data: item };
     }
     async updateQuantity(user, variantId, dto) {
-        const item = await this.cartService.updateQuantity(user.id, variantId, dto.quantity);
+        const item = await this.cartService.updateQuantity(user.id, variantId, dto.quantity, dto.isWholesale ?? false);
         return { data: item };
     }
-    async removeItem(user, variantId) {
-        await this.cartService.removeItem(user.id, variantId);
+    async removeItem(user, variantId, isWholesale) {
+        await this.cartService.removeItem(user.id, variantId, isWholesale === 'true');
         return { message: 'Removed from cart' };
     }
     async clearCart(user) {
@@ -89,8 +89,9 @@ __decorate([
     (0, common_1.Delete)(':variantId'),
     __param(0, (0, current_user_decorator_1.CurrentUser)()),
     __param(1, (0, common_1.Param)('variantId')),
+    __param(2, (0, common_1.Query)('isWholesale')),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [user_entity_1.User, String]),
+    __metadata("design:paramtypes", [user_entity_1.User, String, String]),
     __metadata("design:returntype", Promise)
 ], CartController.prototype, "removeItem", null);
 __decorate([

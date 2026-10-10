@@ -36,6 +36,16 @@ export class UpdateCartQuantityDto {
   @IsInt()
   @Min(0)
   quantity!: number;
+
+  /**
+   * Which line to update — a variant can be in the cart as both a retail and a
+   * wholesale row, so the flag is part of the row identity. The client always
+   * sends it; with `forbidNonWhitelisted` enabled it must be declared here or
+   * the whole request is rejected (400). Defaults to false (retail).
+   */
+  @IsOptional()
+  @IsBoolean()
+  isWholesale?: boolean;
 }
 
 export class MergeCartEntryDto {

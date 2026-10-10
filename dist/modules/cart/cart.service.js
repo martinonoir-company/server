@@ -99,11 +99,13 @@ let CartService = class CartService {
         });
         return this.toView(saved, new Map([[variant.id, variant]]), new Map([[product.id, product]]));
     }
-    async updateQuantity(userId, variantId, quantity) {
+    async updateQuantity(userId, variantId, quantity, isWholesale = false) {
         if (!Number.isInteger(quantity) || quantity < 0) {
             throw new common_1.BadRequestException('quantity must be >= 0');
         }
-        const row = await this.cartRepo.findOne({ where: { userId, variantId } });
+        const row = await this.cartRepo.findOne({
+            where: { userId, variantId, isWholesale },
+        });
         if (!row)
             throw new common_1.NotFoundException('Cart item not found');
         if (quantity === 0) {
@@ -114,8 +116,8 @@ let CartService = class CartService {
         const saved = await this.cartRepo.save(row);
         return this.hydrateOne(saved);
     }
-    async removeItem(userId, variantId) {
-        const result = await this.cartRepo.delete({ userId, variantId });
+    async removeItem(userId, variantId, isWholesale = false) {
+        const result = await this.cartRepo.delete({ userId, variantId, isWholesale });
         if (result.affected === 0) {
             throw new common_1.NotFoundException('Cart item not found');
         }

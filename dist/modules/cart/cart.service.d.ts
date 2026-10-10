@@ -34,8 +34,8 @@ export declare class CartService {
     getCart(userId: string): Promise<CartItemView[]>;
     getCount(userId: string): Promise<number>;
     addItem(userId: string, variantId: string, quantity: number, isWholesale?: boolean): Promise<CartItemView>;
-    updateQuantity(userId: string, variantId: string, quantity: number): Promise<CartItemView | null>;
-    removeItem(userId: string, variantId: string): Promise<void>;
+    updateQuantity(userId: string, variantId: string, quantity: number, isWholesale?: boolean): Promise<CartItemView | null>;
+    removeItem(userId: string, variantId: string, isWholesale?: boolean): Promise<void>;
     clearCart(userId: string): Promise<void>;
     mergeCart(userId: string, entries: {
         variantId: string;

@@ -173,12 +173,17 @@ export class CartService {
     userId: string,
     variantId: string,
     quantity: number,
+    isWholesale = false,
   ): Promise<CartItemView | null> {
     if (!Number.isInteger(quantity) || quantity < 0) {
       throw new BadRequestException('quantity must be >= 0');
     }
 
-    const row = await this.cartRepo.findOne({ where: { userId, variantId } });
+    // A variant can exist as both a retail and a wholesale row, so the flag is
+    // part of the row identity — without it we'd update the wrong line.
+    const row = await this.cartRepo.findOne({
+      where: { userId, variantId, isWholesale },
+    });
     if (!row) throw new NotFoundException('Cart item not found');
 
     if (quantity === 0) {
@@ -191,8 +196,13 @@ export class CartService {
     return this.hydrateOne(saved);
   }
 
-  async removeItem(userId: string, variantId: string): Promise<void> {
-    const result = await this.cartRepo.delete({ userId, variantId });
+  async removeItem(
+    userId: string,
+    variantId: string,
+    isWholesale = false,
+  ): Promise<void> {
+    // Match the exact line (retail vs wholesale) — see updateQuantity.
+    const result = await this.cartRepo.delete({ userId, variantId, isWholesale });
     if (result.affected === 0) {
       throw new NotFoundException('Cart item not found');
     }

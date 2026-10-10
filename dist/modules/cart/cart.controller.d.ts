@@ -18,7 +18,7 @@ export declare class CartController {
     updateQuantity(user: User, variantId: string, dto: UpdateCartQuantityDto): Promise<{
         data: import("./cart.service").CartItemView | null;
     }>;
-    removeItem(user: User, variantId: string): Promise<{
+    removeItem(user: User, variantId: string, isWholesale?: string): Promise<{
         message: string;
     }>;
     clearCart(user: User): Promise<{

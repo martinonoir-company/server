@@ -5,6 +5,7 @@ export declare class AddCartItemDto {
 }
 export declare class UpdateCartQuantityDto {
     quantity: number;
+    isWholesale?: boolean;
 }
 export declare class MergeCartEntryDto {
     variantId: string;

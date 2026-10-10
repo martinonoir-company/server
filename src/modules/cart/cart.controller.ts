@@ -6,6 +6,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { CartService } from './cart.service';
@@ -59,6 +60,7 @@ export class CartController {
       user.id,
       variantId,
       dto.quantity,
+      dto.isWholesale ?? false,
     );
     return { data: item };
   }
@@ -67,8 +69,13 @@ export class CartController {
   async removeItem(
     @CurrentUser() user: User,
     @Param('variantId') variantId: string,
+    @Query('isWholesale') isWholesale?: string,
   ) {
-    await this.cartService.removeItem(user.id, variantId);
+    await this.cartService.removeItem(
+      user.id,
+      variantId,
+      isWholesale === 'true',
+    );
     return { message: 'Removed from cart' };
   }
 
