@@ -359,10 +359,17 @@ export class OrdersService {
       }
     }
 
-    // Send order confirmation email (non-blocking)
-    this.sendOrderEmail(order).catch((err) =>
-      this.logger.error(`Order confirmation email failed: ${err.message}`),
-    );
+    // Send order confirmation ("Order Confirmed!") email only when the order is
+    // already paid at creation — i.e. POS sales. Online orders (storefront /
+    // mobile) are created PENDING_PAYMENT and must NOT get a confirmation
+    // receipt until Paystack actually settles; the PAID status hook in
+    // updateStatus() sends it then. Sending here would email a receipt even to
+    // customers who abandon the Paystack checkout without paying.
+    if (order.status === OrderStatus.PAID) {
+      this.sendOrderEmail(order).catch((err) =>
+        this.logger.error(`Order confirmation email failed: ${err.message}`),
+      );
+    }
 
     return order;
   }
@@ -938,6 +945,26 @@ export class OrdersService {
       order.currency,
       items,
     );
+  }
+
+  /**
+   * Send the "Order Confirmed!" receipt for an order that has just been paid.
+   * Called from the payment-PAID hook (PaymentsService.fireOrderPaidHooks) so
+   * online (storefront/mobile) customers get their receipt only once Paystack
+   * actually settles — never when they abandon the hosted checkout. Loads the
+   * order with its items so the receipt lists line prices. Best-effort: never
+   * throws into the payment path.
+   */
+  async sendOrderConfirmationEmail(orderId: string): Promise<void> {
+    const order = await this.orderRepo.findOne({
+      where: { id: orderId },
+      relations: ['items', 'user'],
+    });
+    if (!order) {
+      this.logger.warn(`Confirmation email: order ${orderId} not found`);
+      return;
+    }
+    await this.sendOrderEmail(order);
   }
 
   private async sendShippingEmail(order: Order): Promise<void> {

@@ -26,8 +26,9 @@ const order_entity_1 = require("../orders/entities/order.entity");
 const agents_service_1 = require("../agents/agents.service");
 const shipping_dispatch_service_1 = require("../shipping/shipping-dispatch.service");
 const pos_gateway_1 = require("../realtime/pos.gateway");
+const orders_service_1 = require("../orders/orders.service");
 let PaymentsService = PaymentsService_1 = class PaymentsService {
-    constructor(moniepoint, paystack, stripe, paymentRepo, orderRepo, dataSource, agentsService, shippingDispatchService, posGateway) {
+    constructor(moniepoint, paystack, stripe, paymentRepo, orderRepo, dataSource, agentsService, shippingDispatchService, posGateway, ordersService) {
         this.moniepoint = moniepoint;
         this.paystack = paystack;
         this.stripe = stripe;
@@ -37,6 +38,7 @@ let PaymentsService = PaymentsService_1 = class PaymentsService {
         this.agentsService = agentsService;
         this.shippingDispatchService = shippingDispatchService;
         this.posGateway = posGateway;
+        this.ordersService = ordersService;
         this.logger = new common_1.Logger(PaymentsService_1.name);
         this.providers = new Map([
             [payment_provider_interface_1.PaymentProviderName.MONIEPOINT, moniepoint],
@@ -184,6 +186,14 @@ let PaymentsService = PaymentsService_1 = class PaymentsService {
         return false;
     }
     async fireOrderPaidHooks(orderId) {
+        if (this.ordersService) {
+            try {
+                await this.ordersService.sendOrderConfirmationEmail(orderId);
+            }
+            catch (err) {
+                this.logger.error(`Order confirmation email failed for order ${orderId}: ${err.message}`);
+            }
+        }
         if (this.agentsService) {
             try {
                 await this.agentsService.applyAttributionOnPaid(orderId);
@@ -439,6 +449,8 @@ exports.PaymentsService = PaymentsService = PaymentsService_1 = __decorate([
     __param(6, (0, common_1.Inject)((0, common_1.forwardRef)(() => agents_service_1.AgentsService))),
     __param(7, (0, common_1.Optional)()),
     __param(8, (0, common_1.Optional)()),
+    __param(9, (0, common_1.Optional)()),
+    __param(9, (0, common_1.Inject)((0, common_1.forwardRef)(() => orders_service_1.OrdersService))),
     __metadata("design:paramtypes", [moniepoint_provider_1.MoniepointProvider,
         paystack_provider_1.PaystackProvider,
         stripe_provider_1.StripeProvider,
@@ -447,6 +459,7 @@ exports.PaymentsService = PaymentsService = PaymentsService_1 = __decorate([
         typeorm_2.DataSource,
         agents_service_1.AgentsService,
         shipping_dispatch_service_1.ShippingDispatchService,
-        pos_gateway_1.PosGateway])
+        pos_gateway_1.PosGateway,
+        orders_service_1.OrdersService])
 ], PaymentsService);
 //# sourceMappingURL=payments.service.js.map

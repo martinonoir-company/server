@@ -12,6 +12,7 @@ import { RefundsModule } from '../refunds/refunds.module';
 import { AgentsModule } from '../agents/agents.module';
 import { ShippingModule } from '../shipping/shipping.module';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { OrdersModule } from '../orders/orders.module';
 
 @Module({
   imports: [
@@ -27,6 +28,10 @@ import { RealtimeModule } from '../realtime/realtime.module';
     // RealtimeModule exposes PosGateway so the order-PAID hook can push a
     // dispatch alert to POS terminals over websocket.
     RealtimeModule,
+    // OrdersModule exposes OrdersService so the order-PAID hook can send the
+    // "Order Confirmed" receipt once payment settles. forwardRef guards against
+    // any transitive import cycle.
+    forwardRef(() => OrdersModule),
   ],
   controllers: [PaymentsController],
   providers: [PaymentsService, MoniepointProvider, PaystackProvider, StripeProvider],

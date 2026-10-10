@@ -262,7 +262,9 @@ let OrdersService = OrdersService_1 = class OrdersService {
             catch {
             }
         }
-        this.sendOrderEmail(order).catch((err) => this.logger.error(`Order confirmation email failed: ${err.message}`));
+        if (order.status === order_entity_1.OrderStatus.PAID) {
+            this.sendOrderEmail(order).catch((err) => this.logger.error(`Order confirmation email failed: ${err.message}`));
+        }
         return order;
     }
     async transitionStatus(orderId, dto, changedBy) {
@@ -606,6 +608,17 @@ let OrdersService = OrdersService_1 = class OrdersService {
             price: toMajor(Number(i.lineTotal)),
         }));
         await this.emailService.sendOrderConfirmation(email, order.orderNumber, toMajor(Number(order.grandTotal)), order.currency, items);
+    }
+    async sendOrderConfirmationEmail(orderId) {
+        const order = await this.orderRepo.findOne({
+            where: { id: orderId },
+            relations: ['items', 'user'],
+        });
+        if (!order) {
+            this.logger.warn(`Confirmation email: order ${orderId} not found`);
+            return;
+        }
+        await this.sendOrderEmail(order);
     }
     async sendShippingEmail(order) {
         const email = await this.resolveOrderEmail(order);

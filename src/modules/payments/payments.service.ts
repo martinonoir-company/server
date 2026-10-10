@@ -33,6 +33,7 @@ import { Order, OrderStatus } from '../orders/entities/order.entity';
 import { AgentsService } from '../agents/agents.service';
 import { ShippingDispatchService } from '../shipping/shipping-dispatch.service';
 import { PosGateway } from '../realtime/pos.gateway';
+import { OrdersService } from '../orders/orders.service';
 
 /** Input to record/begin a payment row. */
 export interface RecordPaymentInput {
@@ -86,6 +87,12 @@ export class PaymentsService {
     // alert is best-effort and must never block or fail the payment path.
     @Optional()
     private readonly posGateway?: PosGateway,
+    // Optional + forwardRef: the order-PAID hook sends the confirmation receipt
+    // through OrdersService. If orders isn't wired (narrow test), payments still
+    // flow — only the receipt email is skipped.
+    @Optional()
+    @Inject(forwardRef(() => OrdersService))
+    private readonly ordersService?: OrdersService,
   ) {
     this.providers = new Map<PaymentProviderName, IPaymentProvider>([
       [PaymentProviderName.MONIEPOINT, moniepoint],
@@ -308,6 +315,22 @@ export class PaymentsService {
    * has been charged. Errors are logged for super-admin follow-up.
    */
   private async fireOrderPaidHooks(orderId: string): Promise<void> {
+    // Order confirmation receipt. Online (storefront/mobile) orders no longer
+    // get a receipt at checkout — only once payment settles here — so an
+    // abandoned Paystack checkout never emails a "confirmed" order. Best-effort:
+    // a mail failure must never bubble into the payment path.
+    if (this.ordersService) {
+      try {
+        await this.ordersService.sendOrderConfirmationEmail(orderId);
+      } catch (err) {
+        this.logger.error(
+          `Order confirmation email failed for order ${orderId}: ${
+            (err as Error).message
+          }`,
+        );
+      }
+    }
+
     if (this.agentsService) {
       try {
         await this.agentsService.applyAttributionOnPaid(orderId);

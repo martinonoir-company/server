@@ -8,6 +8,7 @@ import { Order } from '../orders/entities/order.entity';
 import { AgentsService } from '../agents/agents.service';
 import { ShippingDispatchService } from '../shipping/shipping-dispatch.service';
 import { PosGateway } from '../realtime/pos.gateway';
+import { OrdersService } from '../orders/orders.service';
 export interface RecordPaymentInput {
     orderId: string;
     orderNumber: string;
@@ -34,9 +35,10 @@ export declare class PaymentsService {
     private readonly agentsService?;
     private readonly shippingDispatchService?;
     private readonly posGateway?;
+    private readonly ordersService?;
     private readonly logger;
     private readonly providers;
-    constructor(moniepoint: MoniepointProvider, paystack: PaystackProvider, stripe: StripeProvider, paymentRepo: Repository<Payment>, orderRepo: Repository<Order>, dataSource: DataSource, agentsService?: AgentsService | undefined, shippingDispatchService?: ShippingDispatchService | undefined, posGateway?: PosGateway | undefined);
+    constructor(moniepoint: MoniepointProvider, paystack: PaystackProvider, stripe: StripeProvider, paymentRepo: Repository<Payment>, orderRepo: Repository<Order>, dataSource: DataSource, agentsService?: AgentsService | undefined, shippingDispatchService?: ShippingDispatchService | undefined, posGateway?: PosGateway | undefined, ordersService?: OrdersService | undefined);
     resolveProvider(currency: string, preferred?: PaymentProviderName): IPaymentProvider;
     createProviderPayment(input: CreatePaymentInput, preferred?: PaymentProviderName): Promise<PaymentIntent>;
     verifyProviderPayment(input: VerifyPaymentInput): Promise<PaymentIntent>;

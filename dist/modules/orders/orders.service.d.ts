@@ -53,6 +53,7 @@ export declare class OrdersService {
     findByOrderNumber(orderNumber: string): Promise<Order>;
     findByOrderNumberAndEmail(orderNumber: string, email: string): Promise<Order>;
     private sendOrderEmail;
+    sendOrderConfirmationEmail(orderId: string): Promise<void>;
     private sendShippingEmail;
     private resolveOrderEmail;
 }
