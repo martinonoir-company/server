@@ -919,17 +919,22 @@ export class OrdersService {
     const email = await this.resolveOrderEmail(order);
     if (!email) return;
 
+    // All order money columns are stored in MINOR units (kobo/cents). The email
+    // template formats whatever it's given, so convert to MAJOR units here or
+    // the receipt shows the amount ×100 (e.g. ₦32,600 printed as ₦3,260,000).
+    const toMajor = (minor: number) => minor / 100;
+
     const items = order.items?.map((i) => ({
       name: i.productName,
       variant: i.variantName ?? '',
       quantity: i.quantity,
-      price: Number(i.lineTotal),
+      price: toMajor(Number(i.lineTotal)),
     }));
 
     await this.emailService.sendOrderConfirmation(
       email,
       order.orderNumber,
-      Number(order.grandTotal),
+      toMajor(Number(order.grandTotal)),
       order.currency,
       items,
     );

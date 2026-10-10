@@ -598,13 +598,14 @@ let OrdersService = OrdersService_1 = class OrdersService {
         const email = await this.resolveOrderEmail(order);
         if (!email)
             return;
+        const toMajor = (minor) => minor / 100;
         const items = order.items?.map((i) => ({
             name: i.productName,
             variant: i.variantName ?? '',
             quantity: i.quantity,
-            price: Number(i.lineTotal),
+            price: toMajor(Number(i.lineTotal)),
         }));
-        await this.emailService.sendOrderConfirmation(email, order.orderNumber, Number(order.grandTotal), order.currency, items);
+        await this.emailService.sendOrderConfirmation(email, order.orderNumber, toMajor(Number(order.grandTotal)), order.currency, items);
     }
     async sendShippingEmail(order) {
         const email = await this.resolveOrderEmail(order);
