@@ -21,6 +21,7 @@ import {
   ResendVerificationDto,
   SetupTotpDto,
   DisableTotpDto,
+  CheckAccountEmailDto,
 } from './dto/auth.dto';
 import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
 import { CurrentUser } from '../../shared/decorators/current-user.decorator';
@@ -121,6 +122,23 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async deleteAccount(@CurrentUser() user: User): Promise<void> {
     await this.authService.deleteAccount(user.id);
+  }
+
+  // ── Account-deletion: check email — 10 per 10 min per IP ──
+  //
+  // Powers the storefront account-deletion page's first step: reveal the
+  // password field only when a deletable customer account exists for the
+  // email. Rate-limited to blunt enumeration. The destructive delete itself
+  // still requires full authentication (login → DELETE /auth/account).
+  @Public()
+  @Post('account-deletion/check-email')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 10, ttl: 600000 } })
+  async checkAccountEmail(
+    @Body() dto: CheckAccountEmailDto,
+  ): Promise<{ data: { exists: boolean } }> {
+    const exists = await this.authService.customerEmailExists(dto.email);
+    return { data: { exists } };
   }
 
   // ── Forgot password — 3 per 10 min ──

@@ -1,5 +1,5 @@
 import { AuthService, TokenPair, TotpSetupResult } from './auth.service';
-import { RegisterDto, LoginDto, RefreshTokenDto, ForgotPasswordDto, ResetPasswordDto, VerifyEmailDto, ResendVerificationDto, SetupTotpDto, DisableTotpDto } from './dto/auth.dto';
+import { RegisterDto, LoginDto, RefreshTokenDto, ForgotPasswordDto, ResetPasswordDto, VerifyEmailDto, ResendVerificationDto, SetupTotpDto, DisableTotpDto, CheckAccountEmailDto } from './dto/auth.dto';
 import { User } from '../users/entities/user.entity';
 import { Request } from 'express';
 export declare class AuthController {
@@ -17,6 +17,11 @@ export declare class AuthController {
     logout(dto: RefreshTokenDto): Promise<void>;
     logoutAll(user: User): Promise<void>;
     deleteAccount(user: User): Promise<void>;
+    checkAccountEmail(dto: CheckAccountEmailDto): Promise<{
+        data: {
+            exists: boolean;
+        };
+    }>;
     forgotPassword(dto: ForgotPasswordDto): Promise<{
         message: string;
     }>;

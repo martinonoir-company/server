@@ -84,6 +84,11 @@ export class ResendVerificationDto {
   email!: string;
 }
 
+export class CheckAccountEmailDto {
+  @IsEmail()
+  email!: string;
+}
+
 export class SetupTotpDto {
   /** TOTP code from authenticator app — used to verify setup before enabling */
   @IsString()

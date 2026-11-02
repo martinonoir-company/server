@@ -439,6 +439,12 @@ let AuthService = AuthService_1 = class AuthService {
         await this.rtRepo.save(refreshToken);
         return { accessToken, refreshToken: rawRefreshToken, expiresIn: 900 };
     }
+    async customerEmailExists(email) {
+        const user = await this.userRepo.findOne({
+            where: { email: email.toLowerCase().trim(), role: user_entity_1.UserRole.CUSTOMER },
+        });
+        return !!user;
+    }
     async deleteAccount(userId) {
         const user = await this.userRepo.findOne({ where: { id: userId } });
         if (!user) {

@@ -70,6 +70,7 @@ export declare class AuthService {
     private handleFailedLogin;
     private verifyAndConsumeBackupCode;
     generateTokenPair(user: User, ipAddress?: string, userAgent?: string, family?: string): Promise<TokenPair>;
+    customerEmailExists(email: string): Promise<boolean>;
     deleteAccount(userId: string): Promise<void>;
     hashToken(token: string): string;
 }

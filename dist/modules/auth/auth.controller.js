@@ -60,6 +60,10 @@ let AuthController = class AuthController {
     async deleteAccount(user) {
         await this.authService.deleteAccount(user.id);
     }
+    async checkAccountEmail(dto) {
+        const exists = await this.authService.customerEmailExists(dto.email);
+        return { data: { exists } };
+    }
     async forgotPassword(dto) {
         await this.authService.forgotPassword(dto, NON_AGENT_RESET_SCOPE);
         return {
@@ -161,6 +165,16 @@ __decorate([
     __metadata("design:paramtypes", [user_entity_1.User]),
     __metadata("design:returntype", Promise)
 ], AuthController.prototype, "deleteAccount", null);
+__decorate([
+    (0, public_decorator_1.Public)(),
+    (0, common_1.Post)('account-deletion/check-email'),
+    (0, common_1.HttpCode)(common_1.HttpStatus.OK),
+    (0, throttler_1.Throttle)({ default: { limit: 10, ttl: 600000 } }),
+    __param(0, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [auth_dto_1.CheckAccountEmailDto]),
+    __metadata("design:returntype", Promise)
+], AuthController.prototype, "checkAccountEmail", null);
 __decorate([
     (0, public_decorator_1.Public)(),
     (0, common_1.Post)('forgot-password'),

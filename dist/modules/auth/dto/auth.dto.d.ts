@@ -27,6 +27,9 @@ export declare class VerifyEmailDto {
 export declare class ResendVerificationDto {
     email: string;
 }
+export declare class CheckAccountEmailDto {
+    email: string;
+}
 export declare class SetupTotpDto {
     totpCode: string;
 }

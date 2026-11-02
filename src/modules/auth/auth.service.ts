@@ -705,6 +705,20 @@ export class AuthService {
    * soft-delete-aware findOne (deletedAt IS NULL) AND the real email is no
    * longer stored on any row, so the unique index does not collide.
    */
+  /**
+   * Whether a deletable CUSTOMER account exists for this email. Used by the
+   * storefront account-deletion page to reveal the password step only for a
+   * real account. Scoped to CUSTOMER accounts (staff/agents can't self-delete)
+   * and soft-delete aware (default findOne excludes deletedAt rows), so a
+   * previously-deleted email reads as not existing.
+   */
+  async customerEmailExists(email: string): Promise<boolean> {
+    const user = await this.userRepo.findOne({
+      where: { email: email.toLowerCase().trim(), role: UserRole.CUSTOMER },
+    });
+    return !!user;
+  }
+
   async deleteAccount(userId: string): Promise<void> {
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) {
