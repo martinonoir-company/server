@@ -209,8 +209,52 @@ export class OrdersService {
         );
       }
 
+      // 2b-ii. Typed-code coupon — the customer-entered promo code.
+      //
+      // Runs AFTER auto-apply, on the residual subtotal, mirroring
+      // PricingEngine.quote (4b) EXACTLY so the committed order total equals
+      // the quoted total shown on the review screen. Previously this was NOT
+      // applied at checkout — only the quote engine applied it — so the order
+      // (and therefore the Paystack charge) kept the pre-coupon amount while
+      // the UI showed the discounted one. applyCoupon is pure computation (no
+      // usage side effects), so calling it here is safe.
+      let typedDiscountTotal = 0;
+      let typedCouponCode: string | undefined;
+      let typedCouponType: DiscountType | undefined;
+      if (dto.couponCode && dto.couponCode.trim()) {
+        const couponChannelTyped =
+          channel === OrderChannel.STOREFRONT
+            ? CouponChannel.STOREFRONT
+            : channel === OrderChannel.POS
+              ? CouponChannel.POS
+              : CouponChannel.MOBILE;
+        const subtotalAfterAutoApply = subtotal - autoDiscountTotal;
+        try {
+          const applied = await this.couponsService.applyCoupon(
+            dto.couponCode.trim(),
+            subtotalAfterAutoApply,
+            currency,
+            userId,
+            couponChannelTyped,
+          );
+          if (applied.valid && applied.discountAmount > 0) {
+            typedDiscountTotal = applied.discountAmount;
+            typedCouponCode = applied.code;
+            typedCouponType = applied.discountType;
+          }
+        } catch (err) {
+          // Invalid/unknown code must never block checkout — fall back to no
+          // discount, exactly as the quote engine does.
+          this.logger.warn(
+            `Typed coupon "${dto.couponCode}" failed at checkout: ${
+              (err as Error).message
+            } — proceeding without it.`,
+          );
+        }
+      }
+
       const finalSubtotal = subtotal;
-      const finalDiscountTotal = autoDiscountTotal;
+      const finalDiscountTotal = autoDiscountTotal + typedDiscountTotal;
 
       // 2c. Shipping fee — AAJ Express quote.
       //
@@ -308,23 +352,26 @@ export class OrdersService {
           paymentMethod: dto.paymentMethod,
           paidAt: isPOS ? new Date() : undefined,
           shippingAddress: dto.shippingAddress,
-          // Auto-applied variant promotion wins precedence in audit
-          // trail. If the customer also supplied a typed code, we
-          // record the typed code preferentially since today's
-          // checkout doesn't yet apply typed-code discounts on commit
-          // (only the quote engine does). Either way, when the
-          // discountTotal > 0, couponCode + discountType identify
-          // which coupon produced the credit.
-          couponCode: dto.couponCode ?? autoCouponCode ?? undefined,
-          discountType: autoCouponCode
-            ? DiscountType.PERCENTAGE // auto-apply records the rule type
-            : undefined,
-          discountAppliedBy: autoCouponCode ? 'AUTO' : undefined,
-          discountAppliedByName: autoCouponCode
-            ? 'Auto-applied promotion'
-            : undefined,
+          // Record which coupon produced the credit. A customer-entered (typed)
+          // code — now actually applied above — takes precedence in the audit
+          // trail; otherwise the silently auto-applied variant promotion. When
+          // discountTotal > 0, couponCode + discountType identify the source.
+          couponCode: typedCouponCode ?? autoCouponCode ?? undefined,
+          discountType:
+            typedCouponType ??
+            (autoCouponCode ? DiscountType.PERCENTAGE : undefined),
+          discountAppliedBy: typedCouponCode
+            ? 'CUSTOMER'
+            : autoCouponCode
+              ? 'AUTO'
+              : undefined,
+          discountAppliedByName: typedCouponCode
+            ? 'Promo code'
+            : autoCouponCode
+              ? 'Auto-applied promotion'
+              : undefined,
           discountAppliedAt:
-            autoDiscountTotal > 0 ? new Date() : undefined,
+            finalDiscountTotal > 0 ? new Date() : undefined,
           customerNote: dto.customerNote,
           idempotencyKey: dto.idempotencyKey,
           // Uppercased agent code captured at checkout (storefront /

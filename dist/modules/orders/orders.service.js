@@ -158,8 +158,30 @@ let OrdersService = OrdersService_1 = class OrdersService {
             catch (err) {
                 this.logger.warn(`Auto-apply lookup failed at checkout: ${err.message}`);
             }
+            let typedDiscountTotal = 0;
+            let typedCouponCode;
+            let typedCouponType;
+            if (dto.couponCode && dto.couponCode.trim()) {
+                const couponChannelTyped = channel === order_entity_1.OrderChannel.STOREFRONT
+                    ? coupon_entity_1.CouponChannel.STOREFRONT
+                    : channel === order_entity_1.OrderChannel.POS
+                        ? coupon_entity_1.CouponChannel.POS
+                        : coupon_entity_1.CouponChannel.MOBILE;
+                const subtotalAfterAutoApply = subtotal - autoDiscountTotal;
+                try {
+                    const applied = await this.couponsService.applyCoupon(dto.couponCode.trim(), subtotalAfterAutoApply, currency, userId, couponChannelTyped);
+                    if (applied.valid && applied.discountAmount > 0) {
+                        typedDiscountTotal = applied.discountAmount;
+                        typedCouponCode = applied.code;
+                        typedCouponType = applied.discountType;
+                    }
+                }
+                catch (err) {
+                    this.logger.warn(`Typed coupon "${dto.couponCode}" failed at checkout: ${err.message} — proceeding without it.`);
+                }
+            }
             const finalSubtotal = subtotal;
-            const finalDiscountTotal = autoDiscountTotal;
+            const finalDiscountTotal = autoDiscountTotal + typedDiscountTotal;
             const isPOSChannel = channel === order_entity_1.OrderChannel.POS;
             let shippingTotalKobo = 0;
             let shippingQuoteId = null;
@@ -230,15 +252,20 @@ let OrdersService = OrdersService_1 = class OrdersService {
                     paymentMethod: dto.paymentMethod,
                     paidAt: isPOS ? new Date() : undefined,
                     shippingAddress: dto.shippingAddress,
-                    couponCode: dto.couponCode ?? autoCouponCode ?? undefined,
-                    discountType: autoCouponCode
-                        ? coupon_entity_1.DiscountType.PERCENTAGE
-                        : undefined,
-                    discountAppliedBy: autoCouponCode ? 'AUTO' : undefined,
-                    discountAppliedByName: autoCouponCode
-                        ? 'Auto-applied promotion'
-                        : undefined,
-                    discountAppliedAt: autoDiscountTotal > 0 ? new Date() : undefined,
+                    couponCode: typedCouponCode ?? autoCouponCode ?? undefined,
+                    discountType: typedCouponType ??
+                        (autoCouponCode ? coupon_entity_1.DiscountType.PERCENTAGE : undefined),
+                    discountAppliedBy: typedCouponCode
+                        ? 'CUSTOMER'
+                        : autoCouponCode
+                            ? 'AUTO'
+                            : undefined,
+                    discountAppliedByName: typedCouponCode
+                        ? 'Promo code'
+                        : autoCouponCode
+                            ? 'Auto-applied promotion'
+                            : undefined,
+                    discountAppliedAt: finalDiscountTotal > 0 ? new Date() : undefined,
                     customerNote: dto.customerNote,
                     idempotencyKey: dto.idempotencyKey,
                     agentCode: dto.agentCode?.trim().toUpperCase() || null,
