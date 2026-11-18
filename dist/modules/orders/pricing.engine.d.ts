@@ -20,6 +20,16 @@ export interface QuoteContext {
     couponCode?: string;
     shippingMethod?: string;
     channel?: CouponChannel;
+    recipient?: {
+        name?: string;
+        phone?: string;
+        email?: string;
+        line1?: string;
+        line2?: string;
+        city?: string;
+        postalCode?: string;
+        stateCode?: string;
+    };
 }
 export interface QuoteLine {
     variantId: string;
@@ -52,6 +62,7 @@ export interface QuoteResult {
     shippingTotal: number;
     shippingMethod?: ShippingRate;
     availableShippingRates: ShippingRate[];
+    shippingLive: boolean;
     taxTotal: number;
     grandTotal: number;
     savings: number;

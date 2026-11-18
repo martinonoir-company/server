@@ -98,7 +98,14 @@ let AajProvider = AajProvider_1 = class AajProvider {
                         actualWeight: Math.max(0.1, input.weightKg),
                         ...(this.predefinedDimensionId
                             ? { predefinedDimension: this.predefinedDimensionId }
-                            : {}),
+                            : {
+                                packageDimension: {
+                                    length: AajProvider_1.DEFAULT_BOX.length,
+                                    width: AajProvider_1.DEFAULT_BOX.width,
+                                    height: AajProvider_1.DEFAULT_BOX.height,
+                                    weight: Math.max(0.1, input.weightKg),
+                                },
+                            }),
                         ...(input.items
                             ? {
                                 items: input.items.map((i) => ({
@@ -113,7 +120,7 @@ let AajProvider = AajProvider_1 = class AajProvider {
             },
             deliveryMode,
         };
-        const res = await this.post('/quote', body);
+        const res = await this.postWithRetry('/quote', body, 2);
         if (!res.ok)
             return res;
         const data = res.data;
@@ -394,6 +401,27 @@ let AajProvider = AajProvider_1 = class AajProvider {
     async post(path, body) {
         return this.send('POST', path, body);
     }
+    async postWithRetry(path, body, attempts = 2) {
+        let last = {
+            ok: false,
+            error: 'no attempt made',
+        };
+        for (let i = 0; i < Math.max(1, attempts); i++) {
+            last = await this.send('POST', path, body);
+            if (last.ok)
+                return last;
+            const sc = last.statusCode;
+            const retriable = sc === undefined || sc >= 500;
+            if (!retriable)
+                return last;
+            if (i < attempts - 1) {
+                const backoffMs = 300 * (i + 1);
+                this.logger.warn(`AAJ POST ${path} attempt ${i + 1}/${attempts} failed${sc ? ` (${sc})` : ''} — retrying in ${backoffMs}ms.`);
+                await new Promise((r) => setTimeout(r, backoffMs));
+            }
+        }
+        return last;
+    }
     async get(path) {
         return this.send('GET', path);
     }
@@ -435,6 +463,7 @@ let AajProvider = AajProvider_1 = class AajProvider {
     }
 };
 exports.AajProvider = AajProvider;
+AajProvider.DEFAULT_BOX = { length: 30, width: 25, height: 15 };
 exports.AajProvider = AajProvider = AajProvider_1 = __decorate([
     (0, common_1.Injectable)(),
     __metadata("design:paramtypes", [])

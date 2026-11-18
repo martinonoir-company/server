@@ -81,6 +81,7 @@ export interface AajTrackingResult {
     raw: Record<string, unknown>;
 }
 export declare class AajProvider {
+    private static readonly DEFAULT_BOX;
     private readonly logger;
     private readonly apiKey;
     private readonly baseUrl;
@@ -118,6 +119,7 @@ export declare class AajProvider {
     private addressForQuote;
     private addressForBooking;
     private post;
+    private postWithRetry;
     private get;
     private send;
 }

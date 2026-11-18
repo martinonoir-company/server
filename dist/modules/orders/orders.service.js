@@ -24,6 +24,7 @@ const inventory_service_1 = require("../inventory/inventory.service");
 const inventory_entity_1 = require("../inventory/entities/inventory.entity");
 const cart_service_1 = require("../cart/cart.service");
 const shipping_service_1 = require("../shipping/shipping.service");
+const ng_state_codes_1 = require("../shipping/ng-state-codes");
 const coupons_service_1 = require("../coupons/coupons.service");
 const coupon_entity_1 = require("../coupons/entities/coupon.entity");
 const email_service_1 = require("../notifications/email.service");
@@ -188,43 +189,57 @@ let OrdersService = OrdersService_1 = class OrdersService {
             let shippingQuoteExpiresAt = null;
             const optOut = !!dto.shippingOptOut || isPOSChannel;
             if (!optOut) {
+                const cc = dto.shippingAddress.country.length === 2
+                    ? dto.shippingAddress.country.toUpperCase()
+                    : 'NG';
+                const stateCode = dto.shippingStateCode ??
+                    (cc === 'NG'
+                        ? ((0, ng_state_codes_1.resolveNgState)(dto.shippingAddress.state)?.code ?? undefined)
+                        : undefined);
+                const recipientAddr = {
+                    name: `${dto.shippingAddress.firstName} ${dto.shippingAddress.lastName}`.trim(),
+                    phone: dto.shippingAddress.phone ?? '+2348000000000',
+                    email: dto.guestEmail ?? 'noreply@martinonoir.com',
+                    addressLine1: dto.shippingAddress.line1,
+                    addressLine2: dto.shippingAddress.line2,
+                    city: dto.shippingAddress.city,
+                    state: dto.shippingAddress.state,
+                    stateOrProvinceCode: stateCode,
+                    country: cc === 'NG' ? 'Nigeria' : dto.shippingAddress.country,
+                    countryCode: cc,
+                    postalCode: dto.shippingAddress.postalCode ?? '100001',
+                };
+                const senderAddr = this.shippingService.buildSenderAddress();
+                const weightKg = Math.max(0.5, orderItems.reduce((s, i) => s + (i.quantity ?? 0), 0) * 0.5);
+                let rates = [];
                 try {
-                    const cc = dto.shippingAddress.country.length === 2
-                        ? dto.shippingAddress.country.toUpperCase()
-                        : 'NG';
-                    const recipientAddr = {
-                        name: `${dto.shippingAddress.firstName} ${dto.shippingAddress.lastName}`.trim(),
-                        phone: dto.shippingAddress.phone ?? '+2348000000000',
-                        email: dto.guestEmail ?? 'noreply@martinonoir.com',
-                        addressLine1: dto.shippingAddress.line1,
-                        addressLine2: dto.shippingAddress.line2,
-                        city: dto.shippingAddress.city,
-                        state: dto.shippingAddress.state,
-                        stateOrProvinceCode: dto.shippingStateCode,
-                        country: cc === 'NG' ? 'Nigeria' : dto.shippingAddress.country,
-                        countryCode: cc,
-                        postalCode: dto.shippingAddress.postalCode ?? '100001',
-                    };
-                    const rates = await this.shippingService.calculateRates({
+                    rates = await this.shippingService.calculateRates({
                         country: cc,
                         state: dto.shippingAddress.state,
-                        weightKg: Math.max(0.5, orderItems.reduce((s, i) => s + (i.quantity ?? 0), 0) * 0.5),
+                        weightKg,
                         currency,
                         subtotal: finalSubtotal,
                         recipient: recipientAddr,
+                        sender: senderAddr,
                         itemsValueNgn: Math.round(finalSubtotal / 100),
                     });
-                    if (rates.length > 0) {
-                        const pick = rates[0];
-                        shippingTotalKobo = pick.rate;
-                        shippingQuoteId = pick.quoteId ?? null;
-                        shippingQuoteExpiresAt = pick.expiresAt
-                            ? new Date(pick.expiresAt)
-                            : null;
-                    }
                 }
                 catch (err) {
-                    this.logger.warn(`AAJ quote failed at checkout: ${err.message} — order will be created with 0 shipping fee and retried post-payment.`);
+                    this.logger.warn(`AAJ quote threw at checkout: ${err.message}`);
+                    rates = [];
+                }
+                const pick = rates.length > 0 ? rates[0] : undefined;
+                const isLiveQuote = !!pick?.quoteId;
+                if (cc === 'NG' && !isLiveQuote) {
+                    throw new common_1.BadRequestException('We could not get a live shipping quote right now. Please try ' +
+                        'again in a moment. If this persists, contact support.');
+                }
+                if (pick) {
+                    shippingTotalKobo = pick.rate;
+                    shippingQuoteId = pick.quoteId ?? null;
+                    shippingQuoteExpiresAt = pick.expiresAt
+                        ? new Date(pick.expiresAt)
+                        : null;
                 }
             }
             const finalShippingTotal = shippingTotalKobo;

@@ -32,6 +32,17 @@ import { Type } from 'class-transformer';
 import { CouponChannel } from '../coupons/entities/coupon.entity';
 import { ShippingDispatchService } from '../shipping/shipping-dispatch.service';
 
+class QuoteRecipientDto {
+  @IsOptional() @IsString() name?: string;
+  @IsOptional() @IsString() phone?: string;
+  @IsOptional() @IsString() email?: string;
+  @IsOptional() @IsString() line1?: string;
+  @IsOptional() @IsString() line2?: string;
+  @IsOptional() @IsString() city?: string;
+  @IsOptional() @IsString() postalCode?: string;
+  @IsOptional() @IsString() stateCode?: string;
+}
+
 class QuoteContextDto {
   @IsString() currency!: string;
   @IsString() country!: string;
@@ -41,6 +52,16 @@ class QuoteContextDto {
   @IsOptional() @IsString() shippingMethod?: string;
   /** Sales channel the quote originates from — gates channel-scoped coupons. */
   @IsOptional() @IsEnum(CouponChannel) channel?: CouponChannel;
+  /**
+   * Recipient address for a live AAJ shipping quote. Sent once the customer
+   * reaches Review & Pay with a full address, so the previewed shipping fee
+   * matches what checkout will charge.
+   */
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => QuoteRecipientDto)
+  recipient?: QuoteRecipientDto;
 }
 
 class QuoteItemDto {
@@ -82,6 +103,24 @@ export class OrdersController {
   @HttpCode(HttpStatus.OK)
   async quote(@Body() dto: QuoteRequestDto) {
     const result = await this.pricingEngine.quote(dto.items, dto.context);
+    // When the customer has reached the Review step with a full NG address
+    // (recipient present) but AAJ could not return a live quote, block here —
+    // the same rule checkout enforces — so the UI never shows a fallback
+    // estimate the customer cannot actually be charged.
+    const cc = (dto.context.country ?? '').toUpperCase();
+    const hasRecipient = !!(
+      dto.context.recipient?.line1 && dto.context.recipient?.city
+    );
+    if (
+      (cc === 'NG' || cc === 'NIGERIA') &&
+      hasRecipient &&
+      !result.shippingLive
+    ) {
+      throw new BadRequestException(
+        'We could not get a live shipping quote right now. Please try again ' +
+          'in a moment. If this persists, contact support.',
+      );
+    }
     return { data: result };
   }
 

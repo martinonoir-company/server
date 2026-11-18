@@ -4,6 +4,16 @@ import { PricingEngine } from './pricing.engine';
 import { User } from '../users/entities/user.entity';
 import { CouponChannel } from '../coupons/entities/coupon.entity';
 import { ShippingDispatchService } from '../shipping/shipping-dispatch.service';
+declare class QuoteRecipientDto {
+    name?: string;
+    phone?: string;
+    email?: string;
+    line1?: string;
+    line2?: string;
+    city?: string;
+    postalCode?: string;
+    stateCode?: string;
+}
 declare class QuoteContextDto {
     currency: string;
     country: string;
@@ -12,6 +22,7 @@ declare class QuoteContextDto {
     couponCode?: string;
     shippingMethod?: string;
     channel?: CouponChannel;
+    recipient?: QuoteRecipientDto;
 }
 declare class QuoteItemDto {
     variantId: string;

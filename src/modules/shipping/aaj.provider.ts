@@ -163,6 +163,14 @@ interface AajParty {
 
 @Injectable()
 export class AajProvider {
+  /**
+   * Default parcel dimensions (cm) used only when AAJ_PREDEFINED_DIMENSION_ID
+   * is not configured, so a quote still validates instead of returning a 500.
+   * Represents a small-to-medium Martinonoir parcel. The configured predefined
+   * box is always preferred when available.
+   */
+  private static readonly DEFAULT_BOX = { length: 30, width: 25, height: 15 };
+
   private readonly logger = new Logger(AajProvider.name);
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -298,9 +306,23 @@ export class AajProvider {
         packages: [
           {
             actualWeight: Math.max(0.1, input.weightKg),
+            // AAJ rejects any package that has neither a predefinedDimension id
+            // NOR explicit packageDimension data ("Each package must have
+            // either predefinedDimension ID or packageDimension data" → 500).
+            // Prefer the configured predefined box; when that env var is unset,
+            // fall back to an explicit default box so the quote still validates
+            // instead of 500-ing. The configured box is always preferred so the
+            // quote matches what create-booking will send.
             ...(this.predefinedDimensionId
               ? { predefinedDimension: this.predefinedDimensionId }
-              : {}),
+              : {
+                  packageDimension: {
+                    length: AajProvider.DEFAULT_BOX.length,
+                    width: AajProvider.DEFAULT_BOX.width,
+                    height: AajProvider.DEFAULT_BOX.height,
+                    weight: Math.max(0.1, input.weightKg),
+                  },
+                }),
             ...(input.items
               ? {
                   items: input.items.map((i) => ({
@@ -316,7 +338,10 @@ export class AajProvider {
       deliveryMode,
     };
 
-    const res = await this.post('/quote', body);
+    // A quote is a safe, read-only call. Brief AAJ blips (502/503/504 from
+    // their load balancer, or transient 500s) are common, so retry a couple
+    // of times before giving up — the caller (checkout) blocks on failure.
+    const res = await this.postWithRetry('/quote', body, 2);
     if (!res.ok) return res as AajResult<never>;
     const data = res.data as {
       success?: boolean;
@@ -709,6 +734,43 @@ export class AajProvider {
 
   private async post(path: string, body: unknown): Promise<AajResult<unknown>> {
     return this.send('POST', path, body);
+  }
+
+  /**
+   * POST with a small number of retries, for read-only/idempotent calls like
+   * /quote. Retries on transport errors and on 5xx responses (AAJ's LB emits
+   * 502/503/504 during blips; their app occasionally emits a transient 500).
+   * Does NOT retry on 4xx — those are our payload's fault and won't self-heal.
+   * `attempts` is the TOTAL number of tries (so 2 = one retry).
+   */
+  private async postWithRetry(
+    path: string,
+    body: unknown,
+    attempts = 2,
+  ): Promise<AajResult<unknown>> {
+    let last: AajResult<unknown> = {
+      ok: false,
+      error: 'no attempt made',
+    };
+    for (let i = 0; i < Math.max(1, attempts); i++) {
+      last = await this.send('POST', path, body);
+      if (last.ok) return last;
+      // Only retry when it's worth retrying: no statusCode means a transport
+      // error (timeout/DNS/reset); a 5xx is a server-side blip.
+      const sc = (last as { statusCode?: number }).statusCode;
+      const retriable = sc === undefined || sc >= 500;
+      if (!retriable) return last;
+      if (i < attempts - 1) {
+        const backoffMs = 300 * (i + 1);
+        this.logger.warn(
+          `AAJ POST ${path} attempt ${i + 1}/${attempts} failed${
+            sc ? ` (${sc})` : ''
+          } — retrying in ${backoffMs}ms.`,
+        );
+        await new Promise((r) => setTimeout(r, backoffMs));
+      }
+    }
+    return last;
   }
 
   private async get(path: string): Promise<AajResult<unknown>> {

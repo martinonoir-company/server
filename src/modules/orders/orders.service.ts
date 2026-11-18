@@ -14,6 +14,7 @@ import { InventoryService } from '../inventory/inventory.service';
 import { MovementKind } from '../inventory/entities/inventory.entity';
 import { CartService } from '../cart/cart.service';
 import { ShippingService } from '../shipping/shipping.service';
+import { resolveNgState } from '../shipping/ng-state-codes';
 import { CouponsService } from '../coupons/coupons.service';
 import {
   CouponChannel,
@@ -272,50 +273,79 @@ export class OrdersService {
       let shippingQuoteExpiresAt: Date | null = null;
       const optOut = !!dto.shippingOptOut || isPOSChannel;
       if (!optOut) {
+        const cc =
+          dto.shippingAddress.country.length === 2
+            ? dto.shippingAddress.country.toUpperCase()
+            : 'NG';
+        // Resolve the AAJ state code server-side from the state name (the
+        // client-supplied dto.shippingStateCode is only a hint/override). A
+        // complete code is required for AAJ to price a Nigerian address.
+        const stateCode =
+          dto.shippingStateCode ??
+          (cc === 'NG'
+            ? (resolveNgState(dto.shippingAddress.state)?.code ?? undefined)
+            : undefined);
+        const recipientAddr = {
+          name: `${dto.shippingAddress.firstName} ${dto.shippingAddress.lastName}`.trim(),
+          phone: dto.shippingAddress.phone ?? '+2348000000000',
+          email: dto.guestEmail ?? 'noreply@martinonoir.com',
+          addressLine1: dto.shippingAddress.line1,
+          addressLine2: dto.shippingAddress.line2,
+          city: dto.shippingAddress.city,
+          state: dto.shippingAddress.state,
+          stateOrProvinceCode: stateCode,
+          country: cc === 'NG' ? 'Nigeria' : dto.shippingAddress.country,
+          countryCode: cc,
+          postalCode: dto.shippingAddress.postalCode ?? '100001',
+        };
+        // Sender (dispatch hub) is required for calculateRates to run the live
+        // AAJ path — without it, it would silently use the zone fallback.
+        const senderAddr = this.shippingService.buildSenderAddress();
+        const weightKg = Math.max(
+          0.5,
+          orderItems.reduce((s, i) => s + (i.quantity ?? 0), 0) * 0.5,
+        );
+
+        let rates: Awaited<
+          ReturnType<ShippingService['calculateRates']>
+        > = [];
         try {
-          const cc =
-            dto.shippingAddress.country.length === 2
-              ? dto.shippingAddress.country.toUpperCase()
-              : 'NG';
-          const recipientAddr = {
-            name: `${dto.shippingAddress.firstName} ${dto.shippingAddress.lastName}`.trim(),
-            phone: dto.shippingAddress.phone ?? '+2348000000000',
-            email: dto.guestEmail ?? 'noreply@martinonoir.com',
-            addressLine1: dto.shippingAddress.line1,
-            addressLine2: dto.shippingAddress.line2,
-            city: dto.shippingAddress.city,
-            state: dto.shippingAddress.state,
-            stateOrProvinceCode: dto.shippingStateCode,
-            country: cc === 'NG' ? 'Nigeria' : dto.shippingAddress.country,
-            countryCode: cc,
-            postalCode: dto.shippingAddress.postalCode ?? '100001',
-          };
-          const rates = await this.shippingService.calculateRates({
+          rates = await this.shippingService.calculateRates({
             country: cc,
             state: dto.shippingAddress.state,
-            weightKg: Math.max(
-              0.5,
-              orderItems.reduce((s, i) => s + (i.quantity ?? 0), 0) * 0.5,
-            ),
+            weightKg,
             currency,
             subtotal: finalSubtotal,
             recipient: recipientAddr,
+            sender: senderAddr,
             itemsValueNgn: Math.round(finalSubtotal / 100),
           });
-          if (rates.length > 0) {
-            const pick = rates[0]!;
-            shippingTotalKobo = pick.rate;
-            shippingQuoteId = pick.quoteId ?? null;
-            shippingQuoteExpiresAt = pick.expiresAt
-              ? new Date(pick.expiresAt)
-              : null;
-          }
         } catch (err) {
           this.logger.warn(
-            `AAJ quote failed at checkout: ${
-              (err as Error).message
-            } — order will be created with 0 shipping fee and retried post-payment.`,
+            `AAJ quote threw at checkout: ${(err as Error).message}`,
           );
+          rates = [];
+        }
+
+        const pick = rates.length > 0 ? rates[0]! : undefined;
+        // A live AAJ quote carries a quoteId (draft booking) + expiry; the
+        // zone fallback does not. For Nigerian shipped orders we refuse to
+        // charge a fallback estimate — block checkout so the customer never
+        // pays a guessed price that won't match the real courier fee. The
+        // provider already retries transient AAJ blips before we get here.
+        const isLiveQuote = !!pick?.quoteId;
+        if (cc === 'NG' && !isLiveQuote) {
+          throw new BadRequestException(
+            'We could not get a live shipping quote right now. Please try ' +
+              'again in a moment. If this persists, contact support.',
+          );
+        }
+        if (pick) {
+          shippingTotalKobo = pick.rate;
+          shippingQuoteId = pick.quoteId ?? null;
+          shippingQuoteExpiresAt = pick.expiresAt
+            ? new Date(pick.expiresAt)
+            : null;
         }
       }
       const finalShippingTotal = shippingTotalKobo;

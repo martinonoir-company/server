@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AajProvider, AajAddress, AajPackageItem } from './aaj.provider';
+import { resolveNgState } from './ng-state-codes';
 
 export interface ShippingRate {
   carrier: string;
@@ -67,7 +68,92 @@ export class ShippingService {
     DEFAULT: 500000,
   };
 
+  /**
+   * Per-state base fallback (kobo, for the FIRST kg). Covers all 36 states +
+   * FCT so no state silently collapses to one flat DEFAULT. Grouped by rough
+   * distance band from the Lagos dispatch hub. Used ONLY when live AAJ is
+   * unreachable; checkout blocks on NG quote failure, so this is a last-resort
+   * estimate (e.g. for the storefront preview before an address is complete).
+   */
+  private readonly NG_STATE_BASE: Record<string, number> = {
+    // Lagos hub
+    Lagos: 250000,
+    // South-West / near
+    Ogun: 300000,
+    Oyo: 350000,
+    Osun: 350000,
+    Ondo: 350000,
+    Ekiti: 380000,
+    // South-South / South-East
+    Edo: 400000,
+    Delta: 420000,
+    Rivers: 420000,
+    Bayelsa: 450000,
+    'Cross River': 480000,
+    'Akwa Ibom': 470000,
+    Anambra: 430000,
+    Enugu: 450000,
+    Imo: 450000,
+    Abia: 450000,
+    Ebonyi: 470000,
+    // North-Central / FCT
+    Kwara: 380000,
+    Kogi: 400000,
+    'Federal Capital Territory': 400000,
+    Niger: 430000,
+    Nasarawa: 450000,
+    Benue: 470000,
+    Plateau: 480000,
+    // North-West
+    Kaduna: 480000,
+    Kano: 520000,
+    Katsina: 540000,
+    Jigawa: 560000,
+    Kebbi: 560000,
+    Sokoto: 580000,
+    Zamfara: 560000,
+    // North-East (farthest)
+    Bauchi: 560000,
+    Gombe: 580000,
+    Taraba: 600000,
+    Adamawa: 620000,
+    Yobe: 640000,
+    Borno: 660000,
+  };
+
+  /** Additional kobo charged per extra kg beyond the first, in the fallback. */
+  private readonly NG_PER_EXTRA_KG = 60000;
+
   constructor(private readonly aaj: AajProvider) {}
+
+  /**
+   * Build the sender (dispatch branch) address for a shipping quote from
+   * AAJ_SENDER_* env, defaulting to the Lagos hub. The checkout quote MUST
+   * pass a sender for the live AAJ path to run (calculateRates only calls AAJ
+   * when both recipient AND sender are present). Kept env-based and
+   * dependency-free so both PricingEngine (preview) and OrdersService.checkout
+   * (authoritative charge) can use the same sender without a Branch lookup.
+   * The post-payment booking resolves the concrete branch separately; for a
+   * domestic NG quote AAJ prices on the sender STATE, which is Lagos either
+   * way, so the quoted and booked prices stay aligned.
+   */
+  buildSenderAddress(): AajAddress {
+    const state = process.env['AAJ_SENDER_STATE'] ?? 'Lagos';
+    const resolved = resolveNgState(state);
+    return {
+      name: process.env['AAJ_SENDER_NAME'] ?? 'Martinonoir',
+      phone: process.env['AAJ_SENDER_PHONE'] ?? '+2348038010651',
+      email: process.env['AAJ_SENDER_EMAIL'] ?? 'mail@martinonoir.com',
+      company: 'Martinonoir',
+      addressLine1: process.env['AAJ_SENDER_LINE1'] ?? '1 Admiralty Way',
+      city: process.env['AAJ_SENDER_CITY'] ?? 'Lekki',
+      state: resolved?.name ?? state,
+      stateOrProvinceCode: resolved?.code ?? 'LA',
+      country: 'Nigeria',
+      countryCode: 'NG',
+      postalCode: process.env['AAJ_SENDER_POSTAL'] ?? '101233',
+    };
+  }
 
   /**
    * Return the available shipping rates for a quote. Always returns at
@@ -126,8 +212,17 @@ export class ShippingService {
     const rates: ShippingRate[] = [];
 
     if (input.country === 'NG') {
-      const zoneRate =
-        this.NG_ZONES[input.state] ?? this.NG_ZONES['DEFAULT']!;
+      // Resolve the state name to its canonical form so aliases ("FCT",
+      // "Abuja", "Akwa-Ibom"…) hit the right band instead of silently
+      // collapsing to DEFAULT.
+      const canonical = resolveNgState(input.state)?.name;
+      const base =
+        (canonical ? this.NG_STATE_BASE[canonical] : undefined) ??
+        this.NG_ZONES['DEFAULT']!;
+      // Scale with weight: base covers the first kg, each extra kg adds a
+      // per-kg surcharge, so 1 vs 7 items no longer prices identically.
+      const extraKg = Math.max(0, Math.ceil(input.weightKg) - 1);
+      const zoneRate = base + extraKg * this.NG_PER_EXTRA_KG;
       rates.push({
         carrier: 'AAJ Express',
         service: 'Door delivery (estimate)',

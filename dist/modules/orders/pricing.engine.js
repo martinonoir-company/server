@@ -14,6 +14,7 @@ const common_1 = require("@nestjs/common");
 const coupons_service_1 = require("../coupons/coupons.service");
 const coupon_entity_1 = require("../coupons/entities/coupon.entity");
 const shipping_service_1 = require("../shipping/shipping.service");
+const ng_state_codes_1 = require("../shipping/ng-state-codes");
 let PricingEngine = class PricingEngine {
     constructor(couponsService, shippingService) {
         this.couponsService = couponsService;
@@ -84,12 +85,39 @@ let PricingEngine = class PricingEngine {
         }
         const totalWeightKg = items.reduce((sum, i) => sum + (i.weightKg ?? 0.5) * i.quantity, 0);
         const subtotalAfterDiscount = subtotal - discountTotal;
+        const cc = context.country.length === 2 ? context.country.toUpperCase() : 'NG';
+        const r = context.recipient;
+        const hasRecipient = !!(r && r.line1 && r.city);
+        const recipient = hasRecipient
+            ? {
+                name: r.name ?? 'Customer',
+                phone: r.phone ?? '+2348000000000',
+                email: r.email ?? 'noreply@martinonoir.com',
+                addressLine1: r.line1,
+                addressLine2: r.line2,
+                city: r.city,
+                state: context.state,
+                stateOrProvinceCode: r.stateCode ??
+                    (cc === 'NG'
+                        ? ((0, ng_state_codes_1.resolveNgState)(context.state)?.code ?? undefined)
+                        : undefined),
+                country: cc === 'NG' ? 'Nigeria' : context.country,
+                countryCode: cc,
+                postalCode: r.postalCode ?? '100001',
+            }
+            : undefined;
+        const sender = hasRecipient
+            ? this.shippingService.buildSenderAddress()
+            : undefined;
         const availableShippingRates = await this.shippingService.calculateRates({
             country: context.country,
             state: context.state,
             weightKg: totalWeightKg,
             currency,
             subtotal: subtotalAfterDiscount,
+            ...(recipient ? { recipient } : {}),
+            ...(sender ? { sender } : {}),
+            itemsValueNgn: Math.round(subtotalAfterDiscount / 100),
         });
         let selectedShipping;
         if (context.shippingMethod && availableShippingRates.length > 0) {
@@ -125,6 +153,7 @@ let PricingEngine = class PricingEngine {
             shippingTotal,
             shippingMethod: selectedShipping,
             availableShippingRates,
+            shippingLive: !!selectedShipping?.quoteId,
             taxTotal,
             grandTotal,
             savings,

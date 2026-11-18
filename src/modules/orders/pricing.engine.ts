@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { CouponsService, ApplyCouponResult } from '../coupons/coupons.service';
 import { CouponChannel, DiscountType } from '../coupons/entities/coupon.entity';
 import { ShippingService, ShippingRate } from '../shipping/shipping.service';
+import { resolveNgState } from '../shipping/ng-state-codes';
 
 /**
  * Cart item input for the pricing engine.
@@ -29,6 +30,25 @@ export interface QuoteContext {
   shippingMethod?: string;
   /** Sales channel — gates channel-scoped coupons. */
   channel?: CouponChannel;
+  /**
+   * Recipient address fields for the live AAJ quote. When present (the
+   * customer has reached the Review step with a full address), the engine
+   * passes a recipient + the configured sender into the shipping service so
+   * the previewed shipping fee is the real, input-sensitive AAJ price — the
+   * same one checkout will charge. When absent, shipping falls back to a
+   * zone estimate (early cart preview, before an address exists).
+   */
+  recipient?: {
+    name?: string;
+    phone?: string;
+    email?: string;
+    line1?: string;
+    line2?: string;
+    city?: string;
+    postalCode?: string;
+    /** Optional explicit AAJ state code; resolved from `state` when omitted. */
+    stateCode?: string;
+  };
 }
 
 /**
@@ -79,6 +99,13 @@ export interface QuoteResult {
   shippingTotal: number;
   shippingMethod?: ShippingRate;
   availableShippingRates: ShippingRate[];
+  /**
+   * True when the selected shipping rate is a live AAJ quote (has a draft
+   * booking id), false when it's a zone fallback estimate. The checkout
+   * preview uses this to avoid showing a fallback price the customer could
+   * not actually be charged (NG checkout blocks on a non-live quote).
+   */
+  shippingLive: boolean;
   taxTotal: number;
   grandTotal: number;
   savings: number;
@@ -203,12 +230,46 @@ export class PricingEngine {
     const totalWeightKg = items.reduce((sum, i) => sum + (i.weightKg ?? 0.5) * i.quantity, 0);
     const subtotalAfterDiscount = subtotal - discountTotal;
 
+    // When the customer has a full recipient address (Review step), pass
+    // recipient + the configured sender so the preview reaches the live AAJ
+    // quote (calculateRates only calls AAJ when BOTH are present). Without a
+    // recipient (early cart preview) it uses the zone fallback.
+    const cc =
+      context.country.length === 2 ? context.country.toUpperCase() : 'NG';
+    const r = context.recipient;
+    const hasRecipient = !!(r && r.line1 && r.city);
+    const recipient = hasRecipient
+      ? {
+          name: r!.name ?? 'Customer',
+          phone: r!.phone ?? '+2348000000000',
+          email: r!.email ?? 'noreply@martinonoir.com',
+          addressLine1: r!.line1!,
+          addressLine2: r!.line2,
+          city: r!.city!,
+          state: context.state,
+          stateOrProvinceCode:
+            r!.stateCode ??
+            (cc === 'NG'
+              ? (resolveNgState(context.state)?.code ?? undefined)
+              : undefined),
+          country: cc === 'NG' ? 'Nigeria' : context.country,
+          countryCode: cc,
+          postalCode: r!.postalCode ?? '100001',
+        }
+      : undefined;
+    const sender = hasRecipient
+      ? this.shippingService.buildSenderAddress()
+      : undefined;
+
     const availableShippingRates = await this.shippingService.calculateRates({
       country: context.country,
       state: context.state,
       weightKg: totalWeightKg,
       currency,
       subtotal: subtotalAfterDiscount,
+      ...(recipient ? { recipient } : {}),
+      ...(sender ? { sender } : {}),
+      itemsValueNgn: Math.round(subtotalAfterDiscount / 100),
     });
 
     // Select shipping method (cheapest by default, or specified)
@@ -257,6 +318,7 @@ export class PricingEngine {
       shippingTotal,
       shippingMethod: selectedShipping,
       availableShippingRates,
+      shippingLive: !!selectedShipping?.quoteId,
       taxTotal,
       grandTotal,
       savings,

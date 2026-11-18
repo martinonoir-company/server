@@ -27,6 +27,48 @@ const class_validator_1 = require("class-validator");
 const class_transformer_1 = require("class-transformer");
 const coupon_entity_1 = require("../coupons/entities/coupon.entity");
 const shipping_dispatch_service_1 = require("../shipping/shipping-dispatch.service");
+class QuoteRecipientDto {
+}
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], QuoteRecipientDto.prototype, "name", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], QuoteRecipientDto.prototype, "phone", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], QuoteRecipientDto.prototype, "email", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], QuoteRecipientDto.prototype, "line1", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], QuoteRecipientDto.prototype, "line2", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], QuoteRecipientDto.prototype, "city", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], QuoteRecipientDto.prototype, "postalCode", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], QuoteRecipientDto.prototype, "stateCode", void 0);
 class QuoteContextDto {
 }
 __decorate([
@@ -61,6 +103,13 @@ __decorate([
     (0, class_validator_1.IsEnum)(coupon_entity_1.CouponChannel),
     __metadata("design:type", String)
 ], QuoteContextDto.prototype, "channel", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsObject)(),
+    (0, class_validator_1.ValidateNested)(),
+    (0, class_transformer_1.Type)(() => QuoteRecipientDto),
+    __metadata("design:type", QuoteRecipientDto)
+], QuoteContextDto.prototype, "recipient", void 0);
 class QuoteItemDto {
 }
 __decorate([
@@ -125,6 +174,14 @@ let OrdersController = class OrdersController {
     }
     async quote(dto) {
         const result = await this.pricingEngine.quote(dto.items, dto.context);
+        const cc = (dto.context.country ?? '').toUpperCase();
+        const hasRecipient = !!(dto.context.recipient?.line1 && dto.context.recipient?.city);
+        if ((cc === 'NG' || cc === 'NIGERIA') &&
+            hasRecipient &&
+            !result.shippingLive) {
+            throw new common_1.BadRequestException('We could not get a live shipping quote right now. Please try again ' +
+                'in a moment. If this persists, contact support.');
+        }
         return { data: result };
     }
     async checkout(dto, user) {
