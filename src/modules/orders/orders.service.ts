@@ -935,14 +935,16 @@ export class OrdersService {
       // Orders that ship from a branch and so need a courier handoff.
       qb.andWhere('order.dispatchStatus IS NOT NULL');
       // Payment guard: online orders get dispatchStatus='PENDING' at creation
-      // (while still PENDING_PAYMENT), so dispatchStatus alone would surface
-      // unpaid/abandoned orders. Only show orders that have actually been paid
-      // and are at a stage where dispatch is relevant.
-      qb.andWhere('order.status IN (:...dispatchStatuses)', {
-        dispatchStatuses: [
-          OrderStatus.PAID,
-          OrderStatus.PROCESSING,
-          OrderStatus.SHIPPED,
+      // (while still PENDING_PAYMENT), so dispatchStatus alone surfaces
+      // unpaid/abandoned orders. Exclude the pre-payment / cancelled states so
+      // only orders that have actually been paid appear. We EXCLUDE rather than
+      // whitelist paid states so the "Dispatched" sub-tab keeps SHIPPED and
+      // DELIVERED orders (their dispatchStatus stays set after dispatch).
+      qb.andWhere('order.status NOT IN (:...nonDispatchStatuses)', {
+        nonDispatchStatuses: [
+          OrderStatus.DRAFT,
+          OrderStatus.PENDING_PAYMENT,
+          OrderStatus.CANCELLED,
         ],
       });
     }
