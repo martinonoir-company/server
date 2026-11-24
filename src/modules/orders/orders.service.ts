@@ -934,6 +934,17 @@ export class OrdersService {
     if (query.requiresDispatch === 'true') {
       // Orders that ship from a branch and so need a courier handoff.
       qb.andWhere('order.dispatchStatus IS NOT NULL');
+      // Payment guard: online orders get dispatchStatus='PENDING' at creation
+      // (while still PENDING_PAYMENT), so dispatchStatus alone would surface
+      // unpaid/abandoned orders. Only show orders that have actually been paid
+      // and are at a stage where dispatch is relevant.
+      qb.andWhere('order.status IN (:...dispatchStatuses)', {
+        dispatchStatuses: [
+          OrderStatus.PAID,
+          OrderStatus.PROCESSING,
+          OrderStatus.SHIPPED,
+        ],
+      });
     }
 
     const sortBy = query.sortBy ?? 'createdAt';

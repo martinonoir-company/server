@@ -597,6 +597,13 @@ let OrdersService = OrdersService_1 = class OrdersService {
         }
         if (query.requiresDispatch === 'true') {
             qb.andWhere('order.dispatchStatus IS NOT NULL');
+            qb.andWhere('order.status IN (:...dispatchStatuses)', {
+                dispatchStatuses: [
+                    order_entity_1.OrderStatus.PAID,
+                    order_entity_1.OrderStatus.PROCESSING,
+                    order_entity_1.OrderStatus.SHIPPED,
+                ],
+            });
         }
         const sortBy = query.sortBy ?? 'createdAt';
         const sortOrder = query.sortOrder ?? 'DESC';
