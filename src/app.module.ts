@@ -26,6 +26,7 @@ import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { PosModule } from './modules/pos/pos.module';
 import { WishlistModule } from './modules/wishlist/wishlist.module';
+import { RatingsModule } from './modules/ratings/ratings.module';
 import { SharedModule } from './shared/shared.module';
 import { StaffModule } from './modules/staff/staff.module';
 import { CartModule } from './modules/cart/cart.module';
@@ -94,6 +95,7 @@ import { SettingsModule } from './modules/settings/settings.module';
     AuditModule,
     PosModule,
     WishlistModule,
+    RatingsModule,
     CartModule,
     BranchesModule,
     RealtimeModule,

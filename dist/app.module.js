@@ -31,6 +31,7 @@ const analytics_module_1 = require("./modules/analytics/analytics.module");
 const audit_module_1 = require("./modules/audit/audit.module");
 const pos_module_1 = require("./modules/pos/pos.module");
 const wishlist_module_1 = require("./modules/wishlist/wishlist.module");
+const ratings_module_1 = require("./modules/ratings/ratings.module");
 const shared_module_1 = require("./shared/shared.module");
 const staff_module_1 = require("./modules/staff/staff.module");
 const cart_module_1 = require("./modules/cart/cart.module");
@@ -90,6 +91,7 @@ exports.AppModule = AppModule = __decorate([
             audit_module_1.AuditModule,
             pos_module_1.PosModule,
             wishlist_module_1.WishlistModule,
+            ratings_module_1.RatingsModule,
             cart_module_1.CartModule,
             branches_module_1.BranchesModule,
             realtime_module_1.RealtimeModule,

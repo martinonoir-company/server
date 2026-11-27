@@ -91,6 +91,9 @@ export enum Permission {
   // Accounting (super-admin-only module)
   ACCOUNTING_VIEW = 'accounting:view',
   ACCOUNTING_MANAGE = 'accounting:manage',
+
+  // Order ratings (super-admin-only read)
+  RATINGS_VIEW = 'ratings:view',
 }
 
 /**

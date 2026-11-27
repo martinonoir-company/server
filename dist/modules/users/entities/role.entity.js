@@ -65,6 +65,7 @@ var Permission;
     Permission["AGENT_SELF"] = "agent:self";
     Permission["ACCOUNTING_VIEW"] = "accounting:view";
     Permission["ACCOUNTING_MANAGE"] = "accounting:manage";
+    Permission["RATINGS_VIEW"] = "ratings:view";
 })(Permission || (exports.Permission = Permission = {}));
 let Role = class Role extends base_entity_1.BaseEntity {
 };

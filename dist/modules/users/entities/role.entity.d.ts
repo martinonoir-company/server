@@ -50,7 +50,8 @@ export declare enum Permission {
     AGENTS_COMMISSION_SET = "agents:commission_set",
     AGENT_SELF = "agent:self",
     ACCOUNTING_VIEW = "accounting:view",
-    ACCOUNTING_MANAGE = "accounting:manage"
+    ACCOUNTING_MANAGE = "accounting:manage",
+    RATINGS_VIEW = "ratings:view"
 }
 export declare class Role extends BaseEntity {
     name: string;
